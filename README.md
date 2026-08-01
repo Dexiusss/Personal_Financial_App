@@ -168,12 +168,5 @@ INSERT INTO public.user_settings (id, base_salary, payday_date, email_service_ac
 
 ---
 
-## Documentation
-<img width="1080" height="2400" alt="image" src="https://github.com/user-attachments/assets/46d9981b-40e8-4acb-a52f-1588b6cf8b31" />
-<img width="1080" height="2400" alt="image" src="https://github.com/user-attachments/assets/1aad61f4-1cf1-4e62-8801-a26d47369a37" />
-<img width="1080" height="2400" alt="image" src="https://github.com/user-attachments/assets/94238186-121d-4919-acc2-8b6a47c15876" />
-<img width="1080" height="2400" alt="image" src="https://github.com/user-attachments/assets/5d4da204-8dc1-43dd-bb96-ff0bda865109" />
-<img width="1080" height="2400" alt="image" src="https://github.com/user-attachments/assets/2c070881-8e24-41d8-9f86-cbf1539701ce" />
-
 ## 🛡️ License & Author
 - Built with ❤️ by **@Dexius** for personal financial management and open-source demonstration.
