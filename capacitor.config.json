@@ -1,0 +1,8 @@
+{
+  "appId": "com.financialapp.manager",
+  "appName": "KeuanganKu",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}

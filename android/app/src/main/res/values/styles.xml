@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- Base application theme (Full Dark Mode, No Action Bar) -->
+    <style name="AppTheme" parent="Theme.AppCompat.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="colorPrimary">#090C10</item>
+        <item name="colorPrimaryDark">#090C10</item>
+        <item name="colorAccent">#10B981</item>
+        <item name="android:statusBarColor">#090C10</item>
+        <item name="android:navigationBarColor">#090C10</item>
+        <item name="android:windowBackground">#090C10</item>
+    </style>
+
+    <style name="AppTheme.NoActionBar" parent="Theme.AppCompat.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:statusBarColor">#090C10</item>
+        <item name="android:navigationBarColor">#090C10</item>
+        <item name="android:windowBackground">#090C10</item>
+    </style>
+
+    <style name="AppTheme.NoActionBarLaunch" parent="AppTheme.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:statusBarColor">#090C10</item>
+        <item name="android:navigationBarColor">#090C10</item>
+        <item name="android:windowBackground">#090C10</item>
+    </style>
+</resources>
