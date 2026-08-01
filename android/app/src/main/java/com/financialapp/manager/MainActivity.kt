@@ -196,16 +196,16 @@ fun KeuanganKuMainScreen() {
     var masterPassword by remember { mutableStateOf(sharedPrefs.getString("master_password", "123456") ?: "123456") }
     var isSettingsUnlocked by remember { mutableStateOf(false) }
 
-    // Auto-filled Supabase Credentials
-    var supabaseUrl by remember { mutableStateOf(AppConfig.SUPABASE_URL) }
-    var supabaseKey by remember { mutableStateOf(AppConfig.SUPABASE_ANON_KEY) }
+    // Auto-filled & Persisted Supabase Credentials
+    var supabaseUrl by remember { mutableStateOf(sharedPrefs.getString("supabase_url", AppConfig.SUPABASE_URL) ?: AppConfig.SUPABASE_URL) }
+    var supabaseKey by remember { mutableStateOf(sharedPrefs.getString("supabase_key", AppConfig.SUPABASE_ANON_KEY) ?: AppConfig.SUPABASE_ANON_KEY) }
     var isDatabaseConnected by remember { mutableStateOf(false) }
     var isTestingDbConnection by remember { mutableStateOf(false) }
 
-    // Auto-filled Email API Credentials
-    var isEmailServiceActive by remember { mutableStateOf(false) }
-    var emailApiKey by remember { mutableStateOf("") }
-    var recipientEmail by remember { mutableStateOf("") }
+    // Auto-filled & Persisted Email API Credentials
+    var isEmailServiceActive by remember { mutableStateOf(sharedPrefs.getBoolean("email_service_active", false)) }
+    var emailApiKey by remember { mutableStateOf(sharedPrefs.getString("email_api_key", "") ?: "") }
+    var recipientEmail by remember { mutableStateOf(sharedPrefs.getString("recipient_email", "") ?: "") }
     var emailProvider by remember { mutableStateOf("Resend API (Recommended)") }
     var isEmailConnected by remember { mutableStateOf(true) }
     var isTestingEmailConnection by remember { mutableStateOf(false) }
@@ -855,14 +855,21 @@ fun KeuanganKuMainScreen() {
                             isSettingsUnlocked = isSettingsUnlocked,
                             onUnlockToggle = { isSettingsUnlocked = it },
                             supabaseUrl = supabaseUrl,
-                            onUrlChange = { supabaseUrl = it },
+                            onUrlChange = {
+                                supabaseUrl = it
+                                sharedPrefs.edit().putString("supabase_url", it).apply()
+                            },
                             supabaseKey = supabaseKey,
-                            onKeyChange = { supabaseKey = it },
+                            onKeyChange = {
+                                supabaseKey = it
+                                sharedPrefs.edit().putString("supabase_key", it).apply()
+                            },
                             isDatabaseConnected = isDatabaseConnected,
                             isTestingDbConnection = isTestingDbConnection,
                             onTestDbConnection = {
                                 coroutineScope.launch {
                                     isTestingDbConnection = true
+                                    sharedPrefs.edit().putString("supabase_url", supabaseUrl).putString("supabase_key", supabaseKey).apply()
                                     isDatabaseConnected = pingRealSupabase(supabaseUrl, supabaseKey)
                                     isTestingDbConnection = false
                                     if (isDatabaseConnected) {
@@ -873,11 +880,20 @@ fun KeuanganKuMainScreen() {
                                 }
                             },
                             isEmailServiceActive = isEmailServiceActive,
-                            onEmailServiceActiveChange = { isEmailServiceActive = it },
+                            onEmailServiceActiveChange = {
+                                isEmailServiceActive = it
+                                sharedPrefs.edit().putBoolean("email_service_active", it).apply()
+                            },
                             emailApiKey = emailApiKey,
-                            onEmailApiKeyChange = { emailApiKey = it },
+                            onEmailApiKeyChange = {
+                                emailApiKey = it
+                                sharedPrefs.edit().putString("email_api_key", it).apply()
+                            },
                             recipientEmail = recipientEmail,
-                            onRecipientEmailChange = { recipientEmail = it },
+                            onRecipientEmailChange = {
+                                recipientEmail = it
+                                sharedPrefs.edit().putString("recipient_email", it).apply()
+                            },
                             emailProvider = emailProvider,
                             onEmailProviderChange = { emailProvider = it },
                             isEmailConnected = isEmailConnected,

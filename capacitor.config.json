@@ -1,6 +1,6 @@
 {
   "appId": "com.financialapp.manager",
-  "appName": "KeuanganKu",
+  "appName": "MyMoneyGueh",
   "webDir": "dist",
   "server": {
     "androidScheme": "https"

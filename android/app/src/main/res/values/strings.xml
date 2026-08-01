@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">KeuanganKu</string>
-    <string name="title_activity_main">KeuanganKu</string>
+    <string name="app_name">My Money</string>
+    <string name="title_activity_main">My Money</string>
     <string name="package_name">com.financialapp.manager</string>
     <string name="custom_url_scheme">com.financialapp.manager</string>
 </resources>

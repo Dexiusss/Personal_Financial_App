@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Solid Dark Canvas Background (#0A0C0F) -->
+    <item android:drawable="@color/ic_launcher_background" />
+
+    <!-- Centered Brand Wallet Logo -->
+    <item
+        android:width="120dp"
+        android:height="120dp"
+        android:gravity="center">
+        <vector
+            android:width="120dp"
+            android:height="120dp"
+            android:viewportWidth="108"
+            android:viewportHeight="108">
+            <!-- Outer Rounded Green Square Box matching Image 2 -->
+            <path
+                android:fillColor="#5EB893"
+                android:pathData="M32,24 L76,24 C82.6,24 88,29.4 88,36 L88,72 C88,78.6 82.6,84 76,84 L32,84 C25.4,84 20,78.6 20,72 L20,36 C20,29.4 25.4,24 32,24 Z" />
+
+            <!-- Dark Wallet Body -->
+            <path
+                android:fillColor="#0A0C0F"
+                android:pathData="M36,36 L68,36 C71.3,36 74,38.7 74,42 L74,66 C74,69.3 71.3,72 68,72 L36,72 C32.7,72 30,69.3 30,66 L30,42 C30,38.7 32.7,36 36,36 Z" />
+
+            <!-- Wallet Inner Pocket cutout -->
+            <path
+                android:fillColor="#5EB893"
+                android:pathData="M52,44 L70,44 C72.2,44 74,45.8 74,48 L74,60 C74,62.2 72.2,64 70,64 L52,64 Z" />
+
+            <!-- Wallet Flap Overlay -->
+            <path
+                android:fillColor="#0A0C0F"
+                android:pathData="M50,46 L68,46 C69.7,46 71,47.3 71,49 L71,59 C71,60.7 69.7,62 68,62 L50,62 Z" />
+
+            <!-- Wallet Snap Button Dot -->
+            <path
+                android:fillColor="#5EB893"
+                android:pathData="M58,51 L62,51 C63.1,51 64,51.9 64,53 L64,55 C64,56.1 63.1,57 62,57 L58,57 C56.9,57 56,56.1 56,55 L56,53 C56,51.9 56.9,51 58,51 Z" />
+        </vector>
+    </item>
+</layer-list>
