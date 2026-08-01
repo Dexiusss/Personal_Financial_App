@@ -1,4 +1,4 @@
-# 📱 KeuanganKu - Personal Financial & Budget Manager (Android Native)
+# 📱 My Money Gueh - Personal Financial & Budget Manager (Android Native)
 
 A modern, high-performance **Native Android Financial Management Application** built using **Kotlin**, **Jetpack Compose**, and **Material 3 Design**, fully integrated with **Supabase Cloud REST API** for real-time multi-table database synchronization.
 
