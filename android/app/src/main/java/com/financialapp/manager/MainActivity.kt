@@ -4430,8 +4430,7 @@ fun BankReceiptSyncDialog(
                         rawReceiptText = it
                         parsedReceipt = parseBankReceiptText(it)
                     },
-                    label = { Text("Teks Struk Email / Receipt Text", color = Color.Gray, fontSize = 11.sp) },
-                    placeholder = { Text("Tempel teks email dari rickymario62@gmail.com di sini...", color = Color.Gray) },
+                    placeholder = { Text("Paste receipt email content here...", color = Color.Gray) },
                     maxLines = 6,
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = SageGreen, unfocusedBorderColor = Color.Gray, focusedTextColor = Color.White, unfocusedTextColor = Color.White),
                     modifier = Modifier.fillMaxWidth().height(120.dp)

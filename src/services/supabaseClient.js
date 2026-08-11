@@ -1,8 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 import { getStoredData, STORAGE_KEYS } from './offlineStorage';
 
-const HARDCODED_URL = 'https://lhljhwoupybvcsqgdejs.supabase.co';
-const HARDCODED_KEY = 'sb_publishable_XDFEGRz8Dw-T0s2HT2knew_RdvEOdg4';
+const HARDCODED_URL = '';
+const HARDCODED_KEY = '';
 
 export const getSupabaseCredentials = () => {
   const savedConfig = getStoredData(STORAGE_KEYS.SUPABASE_CONFIG, null);
