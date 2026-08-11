@@ -1,43 +1,127 @@
-# 📱 My Money Gueh - Personal Financial & Budget Manager (Android Native)
+# 📱 MyMoney - Modern Personal Financial & Budget Manager (Android Native)
 
-A modern, high-performance **Native Android Financial Management Application** built using **Kotlin**, **Jetpack Compose**, and **Material 3 Design**, fully integrated with **Supabase Cloud REST API** for real-time multi-table database synchronization.
+[![Kotlin](https://img.shields.io/badge/Kotlin-1.9.22-7F52FF.svg?style=flat&logo=kotlin)](https://kotlinlang.org/)
+[![Jetpack Compose](https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4.svg?style=flat&logo=android)](https://developer.android.com/jetpack/compose)
+[![Material 3](https://img.shields.io/badge/Design-Material%203-757575.svg?style=flat&logo=materialdesign)](https://m3.material.io/)
+[![Supabase](https://img.shields.io/badge/Backend-Supabase%20Cloud-3ECF8E.svg?style=flat&logo=supabase)](https://supabase.com/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
----
-
-## ✨ Features & Highlights
-
-- **📊 Dynamic Economic Overview & Donut Chart**: Features a custom Canvas Donut Chart with a soft ambient radial gradient glow aura.
-- **🔢 Automated Thousands Separator (`2.000.000`)**: Live formatting across all numeric input fields (Salary, Wishlists, Transactions) to prevent typing errors.
-- **☁️ Full Supabase Cloud Sync**: Live bidirectional synchronization across 6 database tables (`transactions`, `wishlists`, `user_settings`, `salary_allocations`, `quick_actions`, `wallets`).
-- **🔐 PIN Security & Local Persistence**: Master Security Lock persisted in Android `SharedPreferences` (`keuanganku_security_prefs`).
-- **🎨 Sleek Dark Glassmorphism UI**: Floating bottom navigation bar with bouncy spring animations (`graphicsLayer` scale) and hardware-accelerated screen transitions (`Crossfade`).
-- **📩 Email API Integration**: Receipt generation & report sync configuration.
+A high-performance, ultra-sleek **Native Android Financial Management Application** engineered with **Kotlin**, **Jetpack Compose (Material 3)**, and integrated with **Supabase Cloud REST API** for real-time multi-table synchronization, coupled with an automated **Pure Gmail Receipt Parser Engine**.
 
 ---
 
-## 📸 App Screenshots & UI Gallery
+## 📌 BAGIAN 1: OVERVIEW FITUR HIGHLIGHT & DISPLAY SCREENSHOTS
+
+### ✨ Highlight Fitur Utama
+
+1. **📊 Economic Overview & Interactive Donut Chart**:
+   - Visualisasi alokasi keuangan real-time dengan Custom Canvas Donut Chart berdesain aura radial gradient modern.
+   - Perhitungan otomatis **Base Salary**, **Extra Income**, **Total Monthly Expenses**, **Net Cash Flow**, dan **Closing Balance**.
+
+2. **💳 Wallets & Asset Tracker**:
+   - Pemisahan sumber dana (Cash, Bank Account, E-Wallet).
+   - Pemilihan siklus bulan otomatis (**Auto-Generate Next Month Cycle** misal: September 2026) yang dapat diaktifkan melalui sakelar di Settings.
+
+3. **🎯 Savings Vault & Wishlist Goals (Auto-Accumulated)**:
+   - Pelacakan progress tabungan impian (Wishlist) yang secara otomatis menghitung akumulasi total tabungan dari alokasi gaji bulanan tanpa perlu input manual.
+
+4. **⚖️ Customize Salary Allocation (Exclusive Budget Allocation)**:
+   - Pembagian persentase gaji kustom (Kebutuhan Pokok 40%, Tabungan 20%, Cicilan 20%, Self Reward 10%, Dana Darurat 10%).
+   - Rincian pengeluaran per kategori yang eksklusif mengikuti alokasi gaji yang dikustomisasi dan tersimpan permanen.
+
+5. **📅 Date Picker Manual Transaction**:
+   - Pilihan tanggal transaksi fleksibel menggunakan pop-up **Android Native DatePicker**. Memungkinkan pencatatan transaksi manual untuk tanggal mana pun di masa lalu maupun mendatang.
+
+6. **🤖 Gmail Receipt Auto-Scanner & Regex Parsing Engine**:
+   - Pemindaian struk pembayaran email secara otomatis (Bank BCA, myBCA, Mandiri, BRI, BNI, GoPay, ShopeePay, Google Play, Grab, Tokopedia, Mamikos).
+   - Ekstraksi otomatis nama merchant, nominal (Rp), tanggal transaksi, dan penghapusan duplikasi transaksi.
+
+7. **🔐 PIN Protection & Master Security**:
+   - Pengaman pengaturan API & Database menggunakan kata sandi master yang tersimpan di Android `SharedPreferences`.
+
+8. **🔢 Automated Thousands Separator (`2.000.000`)**:
+   - Pemformatan angka otomatis saat mengetik untuk mencegah kesalahan input nominal.
+
+---
+
+### 📸 App Screenshots & UI Gallery
 
 <div align="center">
 
-| Economic Overview | Wallets & History | Wishlist Savings | Salary Allocation | Settings & API |
+| Economic Overview | Wallets & Asset Tracker | Wishlist Savings Vault | Customize Salary Allocation | Settings & API Protection |
 | :---: | :---: | :---: | :---: | :---: |
-| <img src="https://github.com/user-attachments/assets/46d9981b-40e8-4acb-a52f-1588b6cf8b31" width="200" alt="Economic Overview" /> | <img src="https://github.com/user-attachments/assets/1aad61f4-1cf1-4e62-8801-a26d47369a37" width="200" alt="Wallets & History" /> | <img src="https://github.com/user-attachments/assets/94238186-121d-4919-acc2-8b6a47c15876" width="200" alt="Wishlist Savings" /> | <img src="https://github.com/user-attachments/assets/5d4da204-8dc1-43dd-bb96-ff0bda865109" width="200" alt="Salary Allocation" /> | <img src="https://github.com/user-attachments/assets/2c070881-8e24-41d8-9f86-cbf1539701ce" width="200" alt="Settings & API" /> |
+| <img src="https://github.com/user-attachments/assets/46d9981b-40e8-4acb-a52f-1588b6cf8b31" width="180" alt="Overview" /> | <img src="https://github.com/user-attachments/assets/1aad61f4-1cf1-4e62-8801-a26d47369a37" width="180" alt="Wallets" /> | <img src="https://github.com/user-attachments/assets/94238186-121d-4919-acc2-8b6a47c15876" width="180" alt="Wishlist" /> | <img src="https://github.com/user-attachments/assets/5d4da204-8dc1-43dd-bb96-ff0bda865109" width="180" alt="Allocation" /> | <img src="https://github.com/user-attachments/assets/2c070881-8e24-41d8-9f86-cbf1539701ce" width="180" alt="Settings" /> |
 
 </div>
 
 ---
 
-## 🗄️ Supabase Database Setup Guide
+## 📖 BAGIAN 2: PANDUAN TUTORIAL SETUP KREDENSIAL DEMI LANGKAH BUKAN TERBANYAK SAMPAI INSTALASI
 
-Instead of maintaining separate `.sql` files, copy and paste the complete SQL DDL and Seed script below directly into your **Supabase SQL Editor** ([https://app.supabase.com](https://app.supabase.com)).
+Panduan lengkap dari pembuatan Kunci API Google Cloud (Gmail API), pembuatan Database Supabase, hingga cara install aplikasi ke smartphone Android Anda.
 
-### 📜 Complete Supabase SQL DDL & Seed Script
+---
+
+### 🔑 Langkah 1: Setup Google Cloud Console & Gmail API Key (OAuth 2.0)
+
+Fitur pindaian struk otomatis membaca email pembayaran langsung dari Gmail Anda menggunakan **Google Cloud OAuth 2.0**. Ikuti langkah pembuatan kredensialnya di bawah ini:
+
+1. **Buka Google Cloud Console**:
+   - Kunjungi [Google Cloud Console](https://console.cloud.google.com) dan masuk menggunakan akun Google / Gmail Anda.
+
+2. **Buat Project Baru**:
+   - Klik menu drop-down project di bagian atas layar -> Klik **New Project**.
+   - Beri nama project: `MyMoney Financial Manager` -> Klik **Create**.
+
+3. **Aktifkan Gmail API**:
+   - Di bilah pencarian atas, ketik **Gmail API** atau buka menu **APIs & Services** -> **Library**.
+   - Cari **Gmail API** -> Klik tombol **Enable**.
+
+4. **Konfigurasi OAuth Consent Screen**:
+   - Buka menu **APIs & Services** -> **OAuth consent screen**.
+   - Pilih User Type: **External** -> Klik **Create**.
+   - Isi form data dasar:
+     - **App name**: `MyMoney`
+     - **User support email**: Email Gmail Anda.
+     - **Developer contact information**: Email Gmail Anda.
+   - Klik **Save and Continue**.
+   - Pada halaman **Scopes**, klik **Add or Remove Scopes**, tambahkan scope berikut:
+     - `https://www.googleapis.com/auth/gmail.readonly` (Hanya akses baca email struk pembayaran)
+   - Tambahkan email Gmail Anda di bagian **Test users** agar dapat login saat mode testing.
+   - Klik **Save and Continue**.
+
+5. **Buat Credentials (OAuth Client ID)**:
+   - Buka menu **APIs & Services** -> **Credentials** -> Klik **+ Create Credentials** -> Pilih **OAuth client ID**.
+   - Pilih **Application type**: **Android** (atau **Web application**).
+   - Isi detail:
+     - **Name**: `MyMoney Android Client`
+     - **Package name**: `com.financialapp.manager`
+   - Klik **Create**.
+   - Salin **Client ID** yang muncul (contoh format: `123456789012-abc123def456.apps.googleusercontent.com`). Salin kode ini untuk dimasukkan ke dalam aplikasi kelak.
+
+---
+
+### 🗄️ Langkah 2: Setup Database Supabase Cloud
+
+Aplikasi ini menggunakan **Supabase Cloud** sebagai penyimpanan data utama secara online.
+
+1. **Buat Akun & Project Supabase**:
+   - Kunjungi [Supabase.com](https://supabase.com) dan daftar/login.
+   - Klik **New Project** -> Beri nama `MyMoney DB`, tentukan password database -> Klik **Create New Project**.
+
+2. **Ambil Credentials Supabase**:
+   - Setelah project selesai dibuat, buka menu **Project Settings** (ikon roda gigi) -> **API**.
+   - Salin **Project URL** (contoh: `https://xxxx.supabase.co`).
+   - Salin **API Key (anon / public)** (contoh: `eyJhbGciOi...`).
+
+3. **Jalankan Script SQL DDL & Seed**:
+   - Buka menu **SQL Editor** di panel kiri Supabase -> Klik **New Query**.
+   - Tempelkan kode SQL lengkap di bawah ini, lalu klik **Run**:
 
 ```sql
 -- Executable SQL Script with RLS ENABLED & PUBLIC POLICIES FOR SUPABASE
--- Run this script in your Supabase SQL Editor (https://app.supabase.com)
 
--- 1. DROP EXISTING TABLES
+-- 1. DROP EXISTING TABLES IF ANY
 DROP TABLE IF EXISTS public.quick_actions CASCADE;
 DROP TABLE IF EXISTS public.transactions CASCADE;
 DROP TABLE IF EXISTS public.salary_allocations CASCADE;
@@ -47,7 +131,7 @@ DROP TABLE IF EXISTS public.wallets CASCADE;
 
 -- 2. CREATE TRANSACTIONS TABLE
 CREATE TABLE public.transactions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id VARCHAR(255) PRIMARY KEY,
     merchant VARCHAR(255) NOT NULL,
     amount BIGINT NOT NULL,
     category VARCHAR(100) NOT NULL,
@@ -64,16 +148,7 @@ CREATE TABLE public.salary_allocations (
     color_hex VARCHAR(20) NOT NULL
 );
 
--- 4. CREATE QUICK ACTIONS TABLE
-CREATE TABLE public.quick_actions (
-    id VARCHAR(50) PRIMARY KEY,
-    title VARCHAR(100) NOT NULL,
-    amount BIGINT NOT NULL,
-    category VARCHAR(100) NOT NULL,
-    color_hex VARCHAR(20) NOT NULL
-);
-
--- 5. CREATE USER SETTINGS TABLE
+-- 4. CREATE USER SETTINGS TABLE
 CREATE TABLE public.user_settings (
     id INT PRIMARY KEY DEFAULT 1,
     base_salary BIGINT NOT NULL DEFAULT 10000000,
@@ -82,7 +157,7 @@ CREATE TABLE public.user_settings (
     recipient_email VARCHAR(255) NOT NULL DEFAULT 'user@example.com'
 );
 
--- 6. CREATE WISHLISTS TABLE
+-- 5. CREATE WISHLISTS TABLE
 CREATE TABLE public.wishlists (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     title VARCHAR(150) NOT NULL,
@@ -92,33 +167,19 @@ CREATE TABLE public.wishlists (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 7. ENABLE ROW LEVEL SECURITY (RLS)
+-- 6. ENABLE ROW LEVEL SECURITY (RLS)
 ALTER TABLE public.transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.salary_allocations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.quick_actions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.wishlists ENABLE ROW LEVEL SECURITY;
 
--- 8. CREATE RLS POLICIES FOR PUBLIC ACCESS
-CREATE POLICY "Allow public SELECT transactions" ON public.transactions FOR SELECT TO public USING (true);
-CREATE POLICY "Allow public INSERT transactions" ON public.transactions FOR INSERT TO public WITH CHECK (true);
-CREATE POLICY "Allow public UPDATE transactions" ON public.transactions FOR UPDATE TO public USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public DELETE transactions" ON public.transactions FOR DELETE TO public USING (true);
-
+-- 7. CREATE RLS POLICIES FOR PUBLIC ACCESS
+CREATE POLICY "Allow public ALL transactions" ON public.transactions FOR ALL TO public USING (true) WITH CHECK (true);
 CREATE POLICY "Allow public ALL salary_allocations" ON public.salary_allocations FOR ALL TO public USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public ALL quick_actions" ON public.quick_actions FOR ALL TO public USING (true) WITH CHECK (true);
 CREATE POLICY "Allow public ALL user_settings" ON public.user_settings FOR ALL TO public USING (true) WITH CHECK (true);
 CREATE POLICY "Allow public ALL wishlists" ON public.wishlists FOR ALL TO public USING (true) WITH CHECK (true);
 
--- 9. INSERT INITIAL SEED DATA
-INSERT INTO public.transactions (id, merchant, amount, category, transaction_date, is_expense) VALUES
-('27fa812b-cca0-4ca9-b9de-7a1767db6018', 'KPR BTN / Cicilan Rumah', 1200000, 'Cicilan & Utang', '2026-08-01', TRUE),
-('5ec056fe-04f9-418b-8a9a-29b8fe1fdb01', 'JUMP START COFFEE 1 - QRIS', 9900, 'Self Reward & Hiburan', '2026-08-01', TRUE),
-('79f3e488-2c66-4994-b98c-47f70af8c002', 'Bensin Pertamax Motor', 50000, 'Kebutuhan Pokok', '2026-07-31', TRUE),
-('c02bea2c-b474-497c-9020-0708465f0003', 'Belanja Supermarket Indomaret', 350000, 'Kebutuhan Pokok', '2026-08-01', TRUE),
-('c26eb23a-e879-4abe-81f3-ce6a83601004', 'Gaji Bulanan Utama', 10000000, 'Pemasukan Utama', '2026-07-25', FALSE),
-('c2adcf47-680f-4f90-83fd-2edfa8998005', 'Bonus Freelance Project', 2500000, 'Pemasukan Ekstra', '2026-08-01', FALSE);
-
+-- 8. INSERT SEED DATA
 INSERT INTO public.salary_allocations (id, name, percentage, color_hex) VALUES
 ('c1', 'Kebutuhan Pokok', 40, '#10B981'),
 ('c2', 'Tabungan & Investasi', 20, '#3B82F6'),
@@ -126,47 +187,69 @@ INSERT INTO public.salary_allocations (id, name, percentage, color_hex) VALUES
 ('c4', 'Self Reward & Hiburan', 10, '#F59E0B'),
 ('c5', 'Dana Darurat', 10, '#8B5CF6');
 
-INSERT INTO public.quick_actions (id, title, amount, category, color_hex) VALUES
-('q1', 'Kopi', 18000, 'Self Reward & Hiburan', '#F43F5E'),
-('q2', 'Makan', 35000, 'Kebutuhan Pokok', '#10B981'),
-('q3', 'Transport', 25000, 'Kebutuhan Pokok', '#3B82F6'),
-('q4', 'Pulsa', 50000, 'Kebutuhan Pokok', '#F59E0B'),
-('q5', 'Snack', 15000, 'Self Reward & Hiburan', '#8B5CF6'),
-('q6', 'Bensin', 30000, 'Kebutuhan Pokok', '#10B981');
-
 INSERT INTO public.user_settings (id, base_salary, payday_date, email_service_active, recipient_email) VALUES
 (1, 10000000, 25, TRUE, 'user@example.com');
 ```
 
 ---
 
-## 🛠️ How to Build & Run (Local Android Emulator / Device)
+### ⚙️ Langkah 3: Konfigurasi Kredensial di Dalam Aplikasi
 
-### Prerequisites
-- Android Studio Hedgehog / Ladybug or Gradle 8.x
-- Android SDK 34+
-- Connected Android Emulator or Physical Device (with USB Debugging)
+Setelah menginstal aplikasi ke smartphone Anda (lihat Langkah 4):
 
-### Build Steps
+1. Buka aplikasi **MyMoney** di HP Android Anda.
+2. Masuk ke tab **Settings** (Ikon Roda Gigi / Tab 5).
+3. Klik **API Settings** dan masukkan Kata Sandi Security (Default PIN: `123456`).
+4. Masukkan kredensial yang telah Anda buat pada langkah 1 & 2:
+   - **Recipient Email Address**: Alamat Gmail Anda.
+   - **Google OAuth Client ID**: Client ID dari Google Cloud Console.
+   - **Supabase URL**: URL Project Supabase Anda.
+   - **Supabase Key**: Anon Public Key Supabase Anda.
+5. Klik **Test Database Connection** & **Verify Google Cloud Services Connection** untuk menguji apakah status berubah menjadi **ONLINE / Active**.
 
-1. **Clone the Repository**:
+---
+
+### 📲 Langkah 4: Kompilasi & Cara Install Berkas APK ke Smartphone
+
+#### Prasyarat Sistem:
+- JDK 17 / Java 17
+- Android Studio Hedgehog / Ladybug atau Gradle 8.x
+- Smartphone Android (Android 8.0 Oreo ke atas, SDK 26+)
+
+#### Cara A: Mengompilasi & Menginstall via Terminal (Direkomendasikan)
+
+1. **Clone Repositori Ini**:
    ```bash
    git clone https://github.com/Dexiusss/Personal_Financial_App.git
    cd Personal_Financial_App
    ```
 
-2. **Build Debug APK**:
+2. **Kompilasi Berkas APK**:
    ```bash
    cd android
    .\gradlew.bat assembleDebug
    ```
+   *Berkas APK akan dihasilkan di folder `android/app/build/outputs/apk/debug/app-debug.apk`.*
 
-3. **Install to Emulator via ADB**:
-   ```bash
-   adb install -r app\build\outputs\apk\debug\app-debug.apk
-   ```
+3. **Install Langsung ke HP via Kabel USB (ADB)**:
+   - Aktifkan **USB Debugging** pada HP Android Anda (di Developer Options).
+   - Hubungkan HP ke PC via kabel USB.
+   - Jalankan perintah berikut di terminal:
+     ```bash
+     adb install -r app\build\outputs\apk\debug\app-debug.apk
+     ```
+
+#### Cara B: Transfer Manual APK ke HP
+
+1. Salin berkas `MyMoney-v1.0.apk` dari komputer ke memori penyimpanan HP Anda (melalui kabel data, Google Drive, atau WhatsApp).
+2. Buka **File Manager** di HP Anda -> Pilih berkas `MyMoney-v1.0.apk`.
+3. Izinkan instalasi dari **Unknown Sources / Sumber Tidak Dikenal** jika diminta.
+4. Klik **Install** dan buka aplikasinya.
 
 ---
 
-## 🛡️ License & Author
-- Built with ❤️ by **@Dexius** for personal financial management and open-source demonstration.
+## 🛡️ Lisensi & Kontributor
+
+- Dikembangkan oleh **@Dexius** menggunakan Kotlin Native & Jetpack Compose.
+- Berlisensi di bawah **MIT License**. Terbuka untuk kontribusi dan pengembangan lebih lanjut.
+
