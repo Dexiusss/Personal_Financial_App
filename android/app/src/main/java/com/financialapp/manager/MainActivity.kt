@@ -1,9 +1,22 @@
 package com.financialapp.manager
 
 import android.os.Bundle
+import android.accounts.Account
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.util.Base64
+import org.json.JSONObject
+import org.json.JSONArray
+import com.google.android.gms.auth.GoogleAuthUtil
+import com.google.android.gms.auth.UserRecoverableAuthException
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInAccount
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.common.api.Scope
+import com.google.android.gms.common.api.ApiException
 import androidx.compose.animation.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -42,7 +55,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
@@ -88,17 +100,17 @@ data class QuickActionModel(
 
 data class WishlistMilestoneModel(
     val id: String,
-    val title: String,
-    val targetAmount: Long,
+    var title: String,
+    var targetAmount: Long,
     var currentSaved: Long,
     val color: Color
 )
 
 // --- Cloud Integration Configuration ---
 object AppConfig {
-    const val SUPABASE_URL = "https://lhljhwoupybvcsqgdejs.supabase.co"
-    const val SUPABASE_ANON_KEY = "sb_publishable_XDFEGRz8Dw-T0s2HT2knew_RdvEOdg4"
-    const val GOOGLE_CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID_PLACEHOLDER"
+    const val SUPABASE_URL = ""
+    const val SUPABASE_ANON_KEY = ""
+    const val GOOGLE_CLIENT_ID = ""
 }
 
 // --- Design System Color Palette ---
@@ -180,11 +192,55 @@ fun KeuanganKuComposeTheme(content: @Composable () -> Unit) {
     )
 }
 
+fun extractFullEmailText(detailJsonStr: String): String {
+    val rootObj = JSONObject(detailJsonStr)
+    val snippet = rootObj.optString("snippet", "")
+    val payload = rootObj.optJSONObject("payload") ?: return snippet
+
+    val sb = StringBuilder()
+    sb.append(snippet).append("\n")
+
+    fun parseParts(partsArray: JSONArray?) {
+        if (partsArray == null) return
+        for (i in 0 until partsArray.length()) {
+            val part = partsArray.getJSONObject(i)
+            val body = part.optJSONObject("body")
+            val dataStr = body?.optString("data", "")
+            if (!dataStr.isNullOrEmpty()) {
+                try {
+                    val decodedBytes = Base64.decode(dataStr, Base64.URL_SAFE or Base64.DEFAULT)
+                    val textContent = String(decodedBytes, Charsets.UTF_8)
+                    val cleanText = textContent.replace(Regex("<[^>]*>"), " ")
+                    sb.append(cleanText).append("\n")
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            if (part.has("parts")) {
+                parseParts(part.optJSONArray("parts"))
+            }
+        }
+    }
+
+    val bodyData = payload.optJSONObject("body")?.optString("data", "")
+    if (!bodyData.isNullOrEmpty()) {
+        try {
+            val decodedBytes = Base64.decode(bodyData, Base64.URL_SAFE or Base64.DEFAULT)
+            val textContent = String(decodedBytes, Charsets.UTF_8)
+            sb.append(textContent.replace(Regex("<[^>]*>"), " ")).append("\n")
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    parseParts(payload.optJSONArray("parts"))
+    return sb.toString()
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun KeuanganKuMainScreen() {
     val context = LocalContext.current
-    val clipboardManager = LocalClipboardManager.current
     val coroutineScope = rememberCoroutineScope()
 
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -203,32 +259,129 @@ fun KeuanganKuMainScreen() {
     var isDatabaseConnected by remember { mutableStateOf(false) }
     var isTestingDbConnection by remember { mutableStateOf(false) }
 
-    // Auto-filled & Persisted Email API Credentials
-    var isEmailServiceActive by remember { mutableStateOf(sharedPrefs.getBoolean("email_service_active", false)) }
-    var emailApiKey by remember { mutableStateOf(sharedPrefs.getString("email_api_key", "") ?: "") }
+    // Auto-filled & Persisted Email API Credentials (Google Cloud Services - Gmail API)
+    val realClientId = AppConfig.GOOGLE_CLIENT_ID
+    var isEmailServiceActive by remember { mutableStateOf(sharedPrefs.getBoolean("email_service_active", true)) }
+    var rawEmailApiKey by remember { mutableStateOf(sharedPrefs.getString("email_api_key", realClientId) ?: realClientId) }
+    
+    // Automatically sanitize Client ID (strip https:// or http:// if accidentally pasted)
+    val emailApiKey = remember(rawEmailApiKey) {
+        rawEmailApiKey.trim().replace("https://", "").replace("http://", "").trim('/')
+    }
+
     var recipientEmail by remember { mutableStateOf(sharedPrefs.getString("recipient_email", "") ?: "") }
-    var emailProvider by remember { mutableStateOf("Resend API (Recommended)") }
     var isEmailConnected by remember { mutableStateOf(true) }
     var isTestingEmailConnection by remember { mutableStateOf(false) }
     var isRefreshingEmail by remember { mutableStateOf(false) }
+    var isGoogleSignedIn by remember { mutableStateOf(sharedPrefs.getBoolean("google_signed_in", false)) }
+    var triggerScanAfterLogin by remember { mutableStateOf(false) }
+
+    // Google Sign-In ActivityResult Launcher with Gmail Scope
+    val googleSignInLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        isGoogleSignedIn = true
+        sharedPrefs.edit().putBoolean("google_signed_in", true).apply()
+        val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
+        try {
+            val signedAccount = task.getResult(ApiException::class.java)
+            val signedEmail = signedAccount?.email ?: recipientEmail
+            recipientEmail = signedEmail
+            sharedPrefs.edit().putString("recipient_email", signedEmail).apply()
+            isEmailConnected = true
+            Toast.makeText(context, "Google Sign-In successful. Connected as $signedEmail.", Toast.LENGTH_SHORT).show()
+            triggerScanAfterLogin = true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            isEmailConnected = true
+        }
+    }
+
+    fun launchGoogleSignIn() {
+        try {
+            val cleanClientId = emailApiKey.trim().replace("https://", "").replace("http://", "").trim('/')
+            val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+                .requestEmail()
+                .requestIdToken(cleanClientId)
+                .requestScopes(Scope("https://www.googleapis.com/auth/gmail.readonly"))
+                .build()
+            val googleSignInClient = GoogleSignIn.getClient(context, gso)
+            googleSignInLauncher.launch(googleSignInClient.signInIntent)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            Toast.makeText(context, "Google Sign-In active for $recipientEmail", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     // Customizable Payday System State (Persisted in Android SharedPreferences)
     var baseSalary by remember { mutableLongStateOf(sharedPrefs.getLong("base_salary", 10000000L)) }
     var isAutoPaydayEnabled by remember { mutableStateOf(sharedPrefs.getBoolean("auto_payday_enabled", true)) }
+    var isAutoNextMonthEnabled by remember { mutableStateOf(sharedPrefs.getBoolean("auto_next_month_enabled", true)) }
     var paydayDate by remember { mutableIntStateOf(sharedPrefs.getInt("payday_date", 25)) }
 
+    // Persistence Functions for Salary Allocation Categories
+    fun saveCategoriesToPrefs(cats: List<AllocationCategoryModel>) {
+        try {
+            val arr = JSONArray()
+            cats.forEach { c ->
+                val obj = JSONObject()
+                obj.put("id", c.id)
+                obj.put("name", c.name)
+                obj.put("percentage", c.percentage)
+                val hex = try {
+                    val r = (c.color.red * 255).toInt()
+                    val g = (c.color.green * 255).toInt()
+                    val b = (c.color.blue * 255).toInt()
+                    String.format("#%02X%02X%02X", r, g, b)
+                } catch (e: Exception) { "#5EB893" }
+                obj.put("color_hex", hex)
+                arr.put(obj)
+            }
+            sharedPrefs.edit().putString("saved_allocation_categories", arr.toString()).apply()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun loadCategoriesFromPrefs(): List<AllocationCategoryModel> {
+        val jsonStr = sharedPrefs.getString("saved_allocation_categories", null) ?: return emptyList()
+        return try {
+            val list = mutableListOf<AllocationCategoryModel>()
+            val arr = JSONArray(jsonStr)
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                val id = obj.optString("id", "c_${i+1}")
+                val name = obj.optString("name", "Category")
+                val pct = obj.optInt("percentage", 10)
+                val colorHex = obj.optString("color_hex", "#5EB893")
+                val color = try { Color(android.graphics.Color.parseColor(colorHex)) } catch (e: Exception) { CategoryColorPalette[i % CategoryColorPalette.size] }
+                list.add(AllocationCategoryModel(id, name, pct, color))
+            }
+            list
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
     // Dynamic Active Data States
-    val categoriesList = remember { mutableStateListOf<AllocationCategoryModel>() }
+    val savedPrefsCats = remember { loadCategoriesFromPrefs() }
+    val categoriesList = remember { 
+        mutableStateListOf<AllocationCategoryModel>().apply { 
+            if (savedPrefsCats.isNotEmpty()) addAll(savedPrefsCats) 
+        } 
+    }
     val transactionsList = remember { mutableStateListOf<TransactionModel>() }
     val wishlistList = remember { mutableStateListOf<WishlistMilestoneModel>() }
-    val selectedSavingsCategoryIds = remember { mutableStateListOf("c2", "c5") }
+    val savedSavingsCatString = sharedPrefs.getString("selected_savings_cat_ids", "c2,c5") ?: "c2,c5"
+    val initialSavingsIds = savedSavingsCatString.split(",").filter { it.isNotBlank() }
+    val selectedSavingsCategoryIds = remember { mutableStateListOf<String>().apply { addAll(initialSavingsIds) } }
     val quickActionsList = remember { mutableStateListOf<QuickActionModel>() }
 
     // Fetch Live Transactions directly from Supabase Cloud REST API
     suspend fun fetchLiveSupabaseTransactions(): List<TransactionModel> {
         return withContext(Dispatchers.IO) {
             try {
-                val url = URL("$supabaseUrl/rest/v1/transactions?select=*&order=created_at.desc")
+                val url = URL("$supabaseUrl/rest/v1/transactions?select=*&order=created_at.asc")
                 val conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.setRequestProperty("apikey", supabaseKey)
@@ -330,6 +483,94 @@ fun KeuanganKuMainScreen() {
 
                 conn.outputStream.write(jsonBody.toByteArray())
                 conn.responseCode in 200..299
+            } catch (e: Exception) {
+                e.printStackTrace()
+                false
+            }
+        }
+    }
+
+    // Supabase PATCH / UPDATE Function for Wishlists
+    suspend fun syncUpdateWishlistSupabase(item: WishlistMilestoneModel): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                var endpoint = "$supabaseUrl/rest/v1/wishlists?id=eq.${item.id}"
+                var url = URL(endpoint)
+                var conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "PATCH"
+                conn.setRequestProperty("apikey", supabaseKey)
+                conn.setRequestProperty("Authorization", "Bearer $supabaseKey")
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.setRequestProperty("Prefer", "return=representation")
+                conn.doOutput = true
+
+                val jsonBody = """
+                    {
+                        "title": "${item.title}",
+                        "target_amount": ${item.targetAmount},
+                        "current_saved": ${item.currentSaved}
+                    }
+                """.trimIndent()
+
+                conn.outputStream.write(jsonBody.toByteArray())
+                var code = conn.responseCode
+
+                if (code in 200..299) {
+                    val resStr = conn.inputStream.bufferedReader().readText()
+                    if (resStr == "[]") {
+                        val encodedTitle = URLEncoder.encode(item.title, "UTF-8").replace("+", "%20")
+                        endpoint = "$supabaseUrl/rest/v1/wishlists?title=eq.$encodedTitle"
+                        url = URL(endpoint)
+                        conn = url.openConnection() as HttpURLConnection
+                        conn.requestMethod = "PATCH"
+                        conn.setRequestProperty("apikey", supabaseKey)
+                        conn.setRequestProperty("Authorization", "Bearer $supabaseKey")
+                        conn.setRequestProperty("Content-Type", "application/json")
+                        conn.setRequestProperty("Prefer", "return=representation")
+                        conn.doOutput = true
+                        conn.outputStream.write(jsonBody.toByteArray())
+                        code = conn.responseCode
+                    }
+                }
+                code in 200..299
+            } catch (e: Exception) {
+                e.printStackTrace()
+                false
+            }
+        }
+    }
+
+    // Supabase DELETE Function for Wishlists
+    suspend fun syncDeleteWishlistSupabase(item: WishlistMilestoneModel): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                var endpoint = "$supabaseUrl/rest/v1/wishlists?id=eq.${item.id}"
+                var url = URL(endpoint)
+                var conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "DELETE"
+                conn.setRequestProperty("apikey", supabaseKey)
+                conn.setRequestProperty("Authorization", "Bearer $supabaseKey")
+                conn.setRequestProperty("Prefer", "return=representation")
+                conn.connectTimeout = 5000
+                var code = conn.responseCode
+
+                var resStr = if (code in 200..299) {
+                    conn.inputStream.bufferedReader().use { it.readText() }
+                } else ""
+
+                if (code in 200..299 && resStr == "[]") {
+                    val encodedTitle = URLEncoder.encode(item.title, "UTF-8").replace("+", "%20")
+                    endpoint = "$supabaseUrl/rest/v1/wishlists?title=eq.$encodedTitle"
+                    url = URL(endpoint)
+                    conn = url.openConnection() as HttpURLConnection
+                    conn.requestMethod = "DELETE"
+                    conn.setRequestProperty("apikey", supabaseKey)
+                    conn.setRequestProperty("Authorization", "Bearer $supabaseKey")
+                    conn.setRequestProperty("Prefer", "return=representation")
+                    conn.connectTimeout = 5000
+                    code = conn.responseCode
+                }
+                code in 200..299
             } catch (e: Exception) {
                 e.printStackTrace()
                 false
@@ -580,52 +821,301 @@ fun KeuanganKuMainScreen() {
         }
     }
 
-    // Live Email Connection Health Check Function
-    suspend fun pingRealEmailApi(apiKeyStr: String): Boolean {
+    // Real Live Email Connection Health Check (Google Cloud OAuth 2.0 Client ID Verification)
+    suspend fun pingRealEmailApi(clientIdStr: String): Boolean {
+        val cleanKey = clientIdStr.trim().replace("https://", "").replace("http://", "").trim('/')
+        if (cleanKey.isBlank()) return false
         return withContext(Dispatchers.IO) {
             try {
-                val url = URL("https://api.resend.com")
-                val conn = url.openConnection() as HttpURLConnection
-                conn.connectTimeout = 3000
-                conn.readTimeout = 3000
-                conn.responseCode in 200..499
+                cleanKey.isNotBlank() && cleanKey.contains("apps.googleusercontent.com")
             } catch (e: Exception) {
-                apiKeyStr.isNotBlank()
+                false
             }
         }
     }
 
-    // Real Email Receipt Scanner Engine
-    fun performEmailReceiptScan() {
+    // Real Pure Gmail Receipt Scanner Engine with Strict Deduplication
+    fun performEmailReceiptScan(customText: String = "", maxEmailCount: Int = 1) {
         if (!isEmailServiceActive) {
             Toast.makeText(context, "Email service is inactive. Turn on the switch in Settings.", Toast.LENGTH_SHORT).show()
             return
         }
+
         coroutineScope.launch {
-            isRefreshingEmail = true
-            delay(1200)
-            isRefreshingEmail = false
-            
-            val hasGrabEmail = transactionsList.any { it.merchant.contains("GrabFood") || it.merchant.contains("Fore Coffee") }
-            val hasLivinEmail = transactionsList.any { it.merchant.contains("Livin") || it.merchant.contains("MAYSYA") }
+            try {
+                isRefreshingEmail = true
+                delay(300)
 
-            if (!hasGrabEmail) {
-                val grabTx = TransactionModel("email_grab_${System.currentTimeMillis()}", "GrabFood (Fore Coffee)", 53488L, "Self Reward & Entertainment", "1 Aug 2026", isExpense = true)
-                transactionsList.add(0, grabTx)
-                syncInsertTransactionSupabase(grabTx)
-            }
+                val textToParse = customText.trim()
+                if (textToParse.isNotBlank()) {
+                    val parsed = EmailReceiptParser.parse(textToParse)
+                    if (parsed.merchant.isNotBlank()) {
+                        transactionsList.removeAll { it.merchant.equals(parsed.merchant, ignoreCase = true) && it.amount == parsed.amount }
+                        
+                        val freshTx = TransactionModel(
+                            id = "email_${parsed.merchant.lowercase().replace(" ", "_")}_${parsed.amount}",
+                            merchant = parsed.merchant,
+                            amount = parsed.amount,
+                            category = "Purchases",
+                            date = parsed.transactionDate,
+                            isExpense = true
+                        )
+                        transactionsList.add(0, freshTx)
+                        syncInsertTransactionSupabase(freshTx)
+                        Toast.makeText(context, "Email receipt processed. Merchant: ${parsed.merchant}, Amount: Rp ${parsed.amount}.", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(context, "Could not find merchant or amount details in this email.", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    val account = GoogleSignIn.getLastSignedInAccount(context)
+                    val userGmail = (account?.email ?: recipientEmail).trim()
+                    if (userGmail.isBlank()) {
+                        Toast.makeText(context, "Please sign in with Google or set your recipient email in Settings.", Toast.LENGTH_LONG).show()
+                        return@launch
+                    }
+                    var parsedCount = 0
+                    var skippedDuplicateCount = 0
+                    val maxParseTarget = if (maxEmailCount <= 1) 1 else 20
+                    val fetchLimit = 20
 
-            if (!hasLivinEmail) {
-                val livinTx = TransactionModel("email_livin_${System.currentTimeMillis()}", "Transfer Livin Mandiri - MAYSYA", 40000L, "Debt & Installments", "1 Aug 2026", isExpense = true)
-                transactionsList.add(0, livinTx)
-                syncInsertTransactionSupabase(livinTx)
-            }
+                    // Clear any old SharedPreferences cache so manual DB deletions can be re-tested smoothly
+                    sharedPrefs.edit().remove("parsed_gmail_msg_ids").apply()
 
-            if (!hasGrabEmail || !hasLivinEmail) {
-                Toast.makeText(context, "Email Sync Successful! 2 Receipts Detected from $recipientEmail 📩", Toast.LENGTH_LONG).show()
-            } else {
-                Toast.makeText(context, "Email Sync Complete! Inbox $recipientEmail connected.", Toast.LENGTH_SHORT).show()
+                    withContext(Dispatchers.IO) {
+                        try {
+                            val googleAccountObject = Account(userGmail, "com.google")
+                            val accessToken = try {
+                                GoogleAuthUtil.getToken(
+                                    context,
+                                    googleAccountObject,
+                                    "oauth2:https://www.googleapis.com/auth/gmail.readonly"
+                                )
+                            } catch (e: UserRecoverableAuthException) {
+                                withContext(Dispatchers.Main) {
+                                    context.startActivity(e.intent)
+                                }
+                                null
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(context, "OAuth Token Error (${userGmail}): ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                }
+                                null
+                            }
+
+                            if (accessToken.isNullOrBlank()) {
+                                return@withContext
+                            }
+
+                            if (!accessToken.isNullOrBlank()) {
+                                val encodedQuery = URLEncoder.encode("category:purchases", "UTF-8")
+                                val url = URL("https://gmail.googleapis.com/gmail/v1/users/me/messages?q=$encodedQuery&maxResults=$fetchLimit")
+                                val conn = url.openConnection() as HttpURLConnection
+                                conn.requestMethod = "GET"
+                                conn.setRequestProperty("Authorization", "Bearer $accessToken")
+                                conn.connectTimeout = 4000
+                                conn.readTimeout = 4000
+
+                                if (conn.responseCode == 200) {
+                                    val jsonStr = conn.inputStream.bufferedReader().readText()
+                                    val rootObj = JSONObject(jsonStr)
+                                    val messagesArray = rootObj.optJSONArray("messages")
+
+                                    if (messagesArray != null) {
+                                        val limit = minOf(fetchLimit, messagesArray.length())
+
+                                        for (i in 0 until limit) {
+                                            val msgId = messagesArray.getJSONObject(i).optString("id")
+
+                                            // DEDUPLICATION CHECK 1: Skip ONLY if this message ID is CURRENTLY in transactionsList
+                                            val isMsgIdAlreadyParsed = withContext(Dispatchers.Main) {
+                                                transactionsList.any { it.id.contains(msgId) }
+                                            }
+                                            if (isMsgIdAlreadyParsed) {
+                                                skippedDuplicateCount++
+                                                continue // SKIP DUPLICATE IN ACTIVE LIST
+                                            }
+
+                                            val detailUrl = URL("https://gmail.googleapis.com/gmail/v1/users/me/messages/$msgId?format=full")
+                                            val detailConn = detailUrl.openConnection() as HttpURLConnection
+                                            detailConn.setRequestProperty("Authorization", "Bearer $accessToken")
+                                            detailConn.connectTimeout = 4000
+                                            detailConn.readTimeout = 4000
+
+                                            if (detailConn.responseCode == 200) {
+                                                val detailJson = detailConn.inputStream.bufferedReader().readText()
+                                                val fullText = extractFullEmailText(detailJson)
+                                                
+                                                // Quick Check: Skip if email does not contain financial / purchase keywords
+                                                val isPurchaseEmail = fullText.contains("Rp", ignoreCase = true) ||
+                                                        fullText.contains("IDR", ignoreCase = true) ||
+                                                        fullText.contains("Nominal", ignoreCase = true) ||
+                                                        fullText.contains("Penerima", ignoreCase = true) ||
+                                                        fullText.contains("Pembayaran", ignoreCase = true) ||
+                                                        fullText.contains("Top-up", ignoreCase = true) ||
+                                                        fullText.contains("Google", ignoreCase = true) ||
+                                                        fullText.contains("Mamikos", ignoreCase = true) ||
+                                                        fullText.contains("Grab", ignoreCase = true)
+
+                                                if (!isPurchaseEmail) {
+                                                    continue // SKIP NON-PURCHASE EMAIL IMMEDIATELY
+                                                }
+
+                                                val parsed = EmailReceiptParser.parse(fullText)
+                                                if (parsed.merchant.isNotBlank() && parsed.amount > 0 && 
+                                                    !parsed.merchant.equals("Struk Transaksi", ignoreCase = true) &&
+                                                    !parsed.merchant.equals("Transaksi Pembelian", ignoreCase = true) &&
+                                                    !parsed.merchant.equals("Merchant / App", ignoreCase = true)) {
+                                                    
+                                                    // DEDUPLICATION CHECK 2: Skip ONLY if Amount + Merchant CURRENTLY exists in active transactionsList
+                                                    val cleanNewAlpha = parsed.merchant.filter { it.isLetterOrDigit() }.lowercase()
+                                                    val isContentAlreadyParsed = withContext(Dispatchers.Main) {
+                                                        transactionsList.any { tx ->
+                                                            val cleanExistAlpha = tx.merchant.filter { it.isLetterOrDigit() }.lowercase()
+                                                            val sameAmount = tx.amount == parsed.amount
+                                                            val sameMerchant = cleanExistAlpha == cleanNewAlpha ||
+                                                                    (cleanExistAlpha.length >= 4 && cleanNewAlpha.length >= 4 && (cleanExistAlpha.contains(cleanNewAlpha) || cleanNewAlpha.contains(cleanExistAlpha)))
+                                                            sameAmount && sameMerchant
+                                                        }
+                                                    }
+
+                                                    if (isContentAlreadyParsed) {
+                                                        skippedDuplicateCount++
+                                                        continue // SKIP DUPLICATE CONTENT IN ACTIVE LIST
+                                                    }
+
+                                                    val freshTx = TransactionModel(
+                                                        id = "gmail_${msgId}_${parsed.amount}",
+                                                        merchant = parsed.merchant,
+                                                        amount = parsed.amount,
+                                                        category = "Essential Needs",
+                                                        date = parsed.transactionDate,
+                                                        isExpense = true
+                                                    )
+                                                    withContext(Dispatchers.Main) {
+                                                        transactionsList.add(freshTx)
+                                                    }
+                                                    syncInsertTransactionSupabase(freshTx)
+                                                    parsedCount++
+
+                                                    // Break early if we reached maxParseTarget (e.g. 1 new receipt for Scan 1)
+                                                    if (parsedCount >= maxParseTarget) {
+                                                        break
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+
+                    withContext(Dispatchers.Main) {
+                        // Purge promo title artifacts
+                        transactionsList.removeAll { 
+                            it.merchant.contains("Aktifkan", ignoreCase = true) ||
+                            it.merchant.contains("Notifikasi", ignoreCase = true) ||
+                            it.merchant.contains("&rsaquo;", ignoreCase = true) ||
+                            it.merchant.contains("eSign", ignoreCase = true) ||
+                            it.merchant.contains("Faster", ignoreCase = true) ||
+                            it.merchant.contains("PDF", ignoreCase = true) ||
+                            (it.amount <= 100L && !it.merchant.contains("Google", ignoreCase = true))
+                        }
+
+                        // Automatic List Deduplication Purge
+                        val uniqueList = mutableListOf<TransactionModel>()
+                        for (tx in transactionsList) {
+                            val cleanTxMerchant = tx.merchant.filter { it.isLetterOrDigit() }.lowercase()
+                            val existsInUnique = uniqueList.any { u ->
+                                val cleanUMerchant = u.merchant.filter { it.isLetterOrDigit() }.lowercase()
+                                u.amount == tx.amount && (
+                                    cleanUMerchant == cleanTxMerchant ||
+                                    (cleanUMerchant.length >= 4 && cleanTxMerchant.length >= 4 && (cleanUMerchant.contains(cleanTxMerchant) || cleanTxMerchant.contains(cleanUMerchant)))
+                                )
+                            }
+                            if (!existsInUnique) {
+                                uniqueList.add(tx)
+                            }
+                        }
+                        if (uniqueList.size < transactionsList.size) {
+                            transactionsList.clear()
+                            transactionsList.addAll(uniqueList)
+                        }
+                    }
+
+                    if (parsedCount > 0) {
+                        Toast.makeText(context, "Successfully processed $parsedCount new receipt transactions from Gmail $userGmail.", Toast.LENGTH_LONG).show()
+                    } else if (skippedDuplicateCount > 0) {
+                        Toast.makeText(context, "Transaction emails were previously processed ($skippedDuplicateCount skipped).", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(context, "No new receipt transactions found in Gmail $userGmail.", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } finally {
+                isRefreshingEmail = false
             }
+        }
+    }
+
+    LaunchedEffect(triggerScanAfterLogin) {
+        if (triggerScanAfterLogin) {
+            triggerScanAfterLogin = false
+            performEmailReceiptScan("", 1)
+        }
+    }
+
+    fun extractFullEmailText(detailJsonStr: String): String {
+        val rootObj = JSONObject(detailJsonStr)
+        val snippet = rootObj.optString("snippet", "")
+        val payload = rootObj.optJSONObject("payload") ?: return snippet
+
+        val sb = StringBuilder()
+        sb.append(snippet).append("\n")
+
+        fun parseParts(partsArray: JSONArray?) {
+            if (partsArray == null) return
+            for (i in 0 until partsArray.length()) {
+                val part = partsArray.getJSONObject(i)
+                val body = part.optJSONObject("body")
+                val dataStr = body?.optString("data", "")
+                if (!dataStr.isNullOrEmpty()) {
+                    try {
+                        val decodedBytes = Base64.decode(dataStr, Base64.URL_SAFE or Base64.DEFAULT)
+                        val textContent = String(decodedBytes, Charsets.UTF_8)
+                        val cleanText = textContent.replace(Regex("<[^>]*>"), " ")
+                        sb.append(cleanText).append("\n")
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+                if (part.has("parts")) {
+                    parseParts(part.optJSONArray("parts"))
+                }
+            }
+        }
+
+        val bodyData = payload.optJSONObject("body")?.optString("data", "")
+        if (!bodyData.isNullOrEmpty()) {
+            try {
+                val decodedBytes = Base64.decode(bodyData, Base64.URL_SAFE or Base64.DEFAULT)
+                val textContent = String(decodedBytes, Charsets.UTF_8)
+                sb.append(textContent.replace(Regex("<[^>]*>"), " ")).append("\n")
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        parseParts(payload.optJSONArray("parts"))
+        return sb.toString()
+    }
+
+    LaunchedEffect(triggerScanAfterLogin) {
+        if (triggerScanAfterLogin) {
+            triggerScanAfterLogin = false
+            performEmailReceiptScan()
         }
     }
 
@@ -657,33 +1147,24 @@ fun KeuanganKuMainScreen() {
         if (liveAllocations.isNotEmpty()) {
             categoriesList.clear()
             categoriesList.addAll(liveAllocations)
+            saveCategoriesToPrefs(liveAllocations)
         } else if (categoriesList.isEmpty()) {
-            categoriesList.addAll(
-                listOf(
-                    AllocationCategoryModel("c1", "Essential Needs", 40, SageGreen),
-                    AllocationCategoryModel("c2", "Savings & Investments", 20, SoftBlue),
-                    AllocationCategoryModel("c3", "Debt & Installments", 20, BlushPink),
-                    AllocationCategoryModel("c4", "Self Reward & Entertainment", 10, PastelGold),
-                    AllocationCategoryModel("c5", "Emergency Fund", 10, LavenderPurple)
-                )
+            val defaultCats = listOf(
+                AllocationCategoryModel("c1", "Essential Needs", 40, SageGreen),
+                AllocationCategoryModel("c2", "Savings & Investments", 20, SoftBlue),
+                AllocationCategoryModel("c3", "Debt & Installments", 20, BlushPink),
+                AllocationCategoryModel("c4", "Self Reward & Entertainment", 10, PastelGold),
+                AllocationCategoryModel("c5", "Emergency Fund", 10, LavenderPurple)
             )
+            categoriesList.addAll(defaultCats)
+            saveCategoriesToPrefs(defaultCats)
         }
 
-        // 3. Fetch Transactions
+        // 3. Fetch Transactions (Honors empty Supabase database cleanly without dummy data)
         val liveSupabaseData = fetchLiveSupabaseTransactions()
         transactionsList.clear()
         if (liveSupabaseData.isNotEmpty()) {
             transactionsList.addAll(liveSupabaseData)
-        } else {
-            transactionsList.addAll(
-                listOf(
-                    TransactionModel("email_grab_101", "Anatoly Belik", 54000L, "Extra Income", "01 Minute Ago", isExpense = false),
-                    TransactionModel("email_livin_102", "Bogdan Nikitin", 52000L, "Extra Income", "02 Minutes Ago", isExpense = false),
-                    TransactionModel("27fa812b-cca0-4ca9-b9de-7a1767db6018", "Home Mortgage (KPR BTN)", 1200000L, "Debt & Installments", "1 Aug 2026", isExpense = true),
-                    TransactionModel("c02bea2c-b474-497c-9020-0708465f0003", "Indomaret Grocery Shopping", 350000L, "Essential Needs", "1 Aug 2026", isExpense = true),
-                    TransactionModel("5ec056fe-04f9-418b-8a9a-29b8fe1fdb01", "Fore Coffee - GrabFood", 53488L, "Self Reward & Entertainment", "1 Aug 2026", isExpense = true)
-                )
-            )
         }
 
         // 4. Fetch Wishlists
@@ -725,7 +1206,6 @@ fun KeuanganKuMainScreen() {
         isLoadingFromDatabase = false
     }
 
-    val totalExpenses = transactionsList.filter { it.isExpense }.sumOf { it.amount }
     val totalExtraIncome = transactionsList.filter { !it.isExpense }.sumOf { it.amount }
     val totalIncome = baseSalary + totalExtraIncome
 
@@ -756,57 +1236,32 @@ fun KeuanganKuMainScreen() {
                 ) { tabIndex ->
                     when (tabIndex) {
                         0 -> EconomicOverviewHomebase(
-                            totalExpenses = totalExpenses,
                             totalIncome = totalIncome,
                             categories = categoriesList,
                             transactions = transactionsList,
-                            quickActions = quickActionsList,
                             isRefreshingEmail = isRefreshingEmail,
-                            recipientEmail = recipientEmail,
-                            onRefreshEmail = { performEmailReceiptScan() },
-                            onOpenAddDialog = { isAddDialogOpen = true },
-                            onQuickAdd = { merchant: String, amount: Long, category: String ->
-                                val newTx = TransactionModel(System.currentTimeMillis().toString(), merchant, amount, category, "Today", isExpense = true)
-                                transactionsList.add(0, newTx)
-                                coroutineScope.launch { syncInsertTransactionSupabase(newTx) }
-                                Toast.makeText(context, "Recorded $merchant to Database!", Toast.LENGTH_SHORT).show()
-                            }
+                            onRefreshEmail = { count -> performEmailReceiptScan("", count) }
                         )
                         1 -> WalletsHomebase(
-                            totalIncome = totalIncome,
-                            totalExpenses = totalExpenses,
-                            totalExtraIncome = totalExtraIncome,
+                            baseSalary = baseSalary,
+                            isAutoPaydayEnabled = isAutoPaydayEnabled,
+                            isAutoNextMonthEnabled = isAutoNextMonthEnabled,
+                            paydayDate = paydayDate,
+                            salaryStartMonth = "2026-07",
                             transactions = transactionsList,
                             categories = categoriesList,
-                            onOpenBankSyncDialog = { isBankReceiptDialogOpen = true },
-                            onCopySqlFix = {
-                                val rlsPolicySql = """
-                                    CREATE POLICY "Allow public SELECT" ON public.transactions FOR SELECT TO public USING (true);
-                                    CREATE POLICY "Allow public INSERT" ON public.transactions FOR INSERT TO public WITH CHECK (true);
-                                    CREATE POLICY "Allow public UPDATE" ON public.transactions FOR UPDATE TO public USING (true) WITH CHECK (true);
-                                    CREATE POLICY "Allow public DELETE" ON public.transactions FOR DELETE TO public USING (true);
-                                """.trimIndent()
-                                clipboardManager.setText(AnnotatedString(rlsPolicySql))
-                                Toast.makeText(context, "SQL RLS Policy Copied! Run it in Supabase SQL Editor.", Toast.LENGTH_LONG).show()
-                            },
                             onUpdateTransaction = { tx: TransactionModel ->
                                 val idx = transactionsList.indexOfFirst { it.id == tx.id }
                                 if (idx != -1) {
                                     transactionsList[idx] = tx
                                 }
                                 coroutineScope.launch { syncUpdateTransactionSupabase(tx) }
-                                Toast.makeText(context, "Transaction '${tx.merchant}' updated in Supabase Database!", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Transaction '${tx.merchant}' updated successfully.", Toast.LENGTH_SHORT).show()
                             },
                             onDeleteTransaction = { tx: TransactionModel ->
                                 transactionsList.remove(tx)
-                                coroutineScope.launch {
-                                    val result = syncDeleteTransactionSupabase(tx)
-                                    when (result) {
-                                        "SUCCESS" -> Toast.makeText(context, "Success! '${tx.merchant}' deleted from Supabase DB!", Toast.LENGTH_LONG).show()
-                                        "RLS_BLOCKED" -> Toast.makeText(context, "⚠️ Supabase RLS Blocked Delete! Click 'Copy RLS Policy SQL' to grant permission.", Toast.LENGTH_LONG).show()
-                                        else -> Toast.makeText(context, "Sync Status: $result", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
+                                coroutineScope.launch { syncDeleteTransactionSupabase(tx) }
+                                Toast.makeText(context, "Transaction '${tx.merchant}' deleted successfully.", Toast.LENGTH_SHORT).show()
                             }
                         )
                         2 -> SavingsHomebase(
@@ -816,6 +1271,7 @@ fun KeuanganKuMainScreen() {
                             onSavingsCategoriesChanged = { newIds: List<String> ->
                                 selectedSavingsCategoryIds.clear()
                                 selectedSavingsCategoryIds.addAll(newIds)
+                                sharedPrefs.edit().putString("selected_savings_cat_ids", newIds.joinToString(",")).apply()
                             },
                             wishlists = wishlistList,
                             onAddWishlist = { title: String, target: Long, current: Long ->
@@ -826,10 +1282,25 @@ fun KeuanganKuMainScreen() {
                                     syncInsertWishlistSupabase(newWishlist)
                                 }
                             },
+                            onUpdateWishlist = { item: WishlistMilestoneModel ->
+                                val idx = wishlistList.indexOfFirst { it.id == item.id || it.title == item.title }
+                                if (idx != -1) {
+                                    wishlistList[idx] = item
+                                }
+                                coroutineScope.launch {
+                                    syncUpdateWishlistSupabase(item)
+                                }
+                            },
+                            onDeleteWishlist = { item: WishlistMilestoneModel ->
+                                wishlistList.removeAll { it.id == item.id || it.title == item.title }
+                                coroutineScope.launch {
+                                    syncDeleteWishlistSupabase(item)
+                                }
+                            },
                             transactions = transactionsList,
                             onDepositSavings = { note: String, amount: Long, category: String ->
                                 val newTx = TransactionModel("dep_${System.currentTimeMillis()}", note, amount, category, "Today", isExpense = false)
-                                transactionsList.add(0, newTx)
+                                transactionsList.add(newTx)
                                 coroutineScope.launch { syncInsertTransactionSupabase(newTx) }
                             }
                         )
@@ -844,25 +1315,32 @@ fun KeuanganKuMainScreen() {
                                 isAutoPaydayEnabled = enabled
                                 sharedPrefs.edit().putBoolean("auto_payday_enabled", enabled).apply()
                             },
+                            isAutoNextMonthEnabled = isAutoNextMonthEnabled,
+                            onAutoNextMonthToggle = { enabled ->
+                                isAutoNextMonthEnabled = enabled
+                                sharedPrefs.edit().putBoolean("auto_next_month_enabled", enabled).apply()
+                            },
                             paydayDate = paydayDate,
                             onPaydayDateChange = { newDate ->
                                 paydayDate = newDate
                                 sharedPrefs.edit().putInt("payday_date", newDate).apply()
                             },
-                            onTriggerPaydayNow = {
-                                Toast.makeText(context, "Automated Payday Day $paydayDate Successful! Salary $baseSalary Updated.", Toast.LENGTH_LONG).show()
-                            },
                             categories = categoriesList,
                             onAddCategory = { name: String, initialPct: Int ->
                                 val color = CategoryColorPalette[categoriesList.size % CategoryColorPalette.size]
                                 categoriesList.add(AllocationCategoryModel("c_${System.currentTimeMillis()}", name, initialPct, color))
+                                saveCategoriesToPrefs(categoriesList)
                             },
                             onDeleteCategory = { cat: AllocationCategoryModel ->
                                 if (categoriesList.size > 1) {
                                     categoriesList.remove(cat)
+                                    saveCategoriesToPrefs(categoriesList)
                                 } else {
                                     Toast.makeText(context, "At least 1 category is required!", Toast.LENGTH_SHORT).show()
                                 }
+                            },
+                            onSaveCategories = {
+                                saveCategoriesToPrefs(categoriesList)
                             },
                             transactions = transactionsList
                         )
@@ -906,35 +1384,22 @@ fun KeuanganKuMainScreen() {
                                 sharedPrefs.edit().putBoolean("email_service_active", it).apply()
                             },
                             emailApiKey = emailApiKey,
-                            onEmailApiKeyChange = {
-                                emailApiKey = it
-                                sharedPrefs.edit().putString("email_api_key", it).apply()
+                            onEmailApiKeyChange = { newKey ->
+                                rawEmailApiKey = newKey
+                                sharedPrefs.edit().putString("email_api_key", newKey).apply()
                             },
                             recipientEmail = recipientEmail,
-                            onRecipientEmailChange = {
-                                recipientEmail = it
-                                sharedPrefs.edit().putString("recipient_email", it).apply()
+                            onRecipientEmailChange = { newEmail ->
+                                recipientEmail = newEmail
+                                sharedPrefs.edit().putString("recipient_email", newEmail).apply()
                             },
-                            emailProvider = emailProvider,
-                            onEmailProviderChange = { emailProvider = it },
                             isEmailConnected = isEmailConnected,
                             isTestingEmailConnection = isTestingEmailConnection,
                             onTestSendEmail = {
                                 if (!isEmailServiceActive) {
-                                    Toast.makeText(context, "Email service is inactive! Turn on the switch first.", Toast.LENGTH_LONG).show()
-                                } else if (emailApiKey.isBlank()) {
-                                    Toast.makeText(context, "API Key is empty! Enter your Resend/SendGrid API Key.", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(context, "Layanan email nonaktif. Aktifkan sakelar terlebih dahulu.", Toast.LENGTH_LONG).show()
                                 } else {
-                                    coroutineScope.launch {
-                                        isTestingEmailConnection = true
-                                        isEmailConnected = pingRealEmailApi(emailApiKey)
-                                        isTestingEmailConnection = false
-                                        if (isEmailConnected) {
-                                            Toast.makeText(context, "Live API Connection Success! Receipt Sent to $recipientEmail 📩", Toast.LENGTH_LONG).show()
-                                        } else {
-                                            Toast.makeText(context, "Email API Key Verification Failed!", Toast.LENGTH_LONG).show()
-                                        }
-                                    }
+                                    launchGoogleSignIn()
                                 }
                             }
                         )
@@ -949,13 +1414,14 @@ fun KeuanganKuMainScreen() {
             AddTransactionDropdownDialog(
                 categories = categoriesList.map { "${it.name} (${it.percentage}%)" },
                 onDismiss = { isAddDialogOpen = false },
-                onAdd = { merchant, amount, category, isExpense ->
-                    val newTx = TransactionModel(System.currentTimeMillis().toString(), merchant, amount, category, "Today", isExpense = isExpense)
+                onAdd = { merchant, amount, category, date, isExpense ->
+                    val txDate = date.ifBlank { "Today" }
+                    val newTx = TransactionModel(System.currentTimeMillis().toString(), merchant, amount, category, txDate, isExpense = isExpense)
                     transactionsList.add(0, newTx)
                     coroutineScope.launch { syncInsertTransactionSupabase(newTx) }
                     isAddDialogOpen = false
                     val typeText = if (isExpense) "Expense" else "Extra Income"
-                    Toast.makeText(context, "Successfully added $typeText & saved to Database!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Successfully added $typeText for $txDate & saved to Database!", Toast.LENGTH_SHORT).show()
                 }
             )
         }
@@ -966,17 +1432,18 @@ fun KeuanganKuMainScreen() {
                 onDismiss = { isBankReceiptDialogOpen = false },
                 onImportReceipt = { parsed ->
                     val newTx = TransactionModel(
-                        id = System.currentTimeMillis().toString(),
+                        id = "email_${parsed.merchant.lowercase().replace(" ", "_")}_${parsed.amount}",
                         merchant = parsed.merchant,
                         amount = parsed.amount,
-                        category = parsed.category,
+                        category = "Essential Needs",
                         date = parsed.transactionDate,
                         isExpense = parsed.isExpense
                     )
-                    transactionsList.add(0, newTx)
+                    transactionsList.removeAll { it.merchant.equals(parsed.merchant, ignoreCase = true) && it.amount == parsed.amount }
+                    transactionsList.add(newTx)
                     coroutineScope.launch { syncInsertTransactionSupabase(newTx) }
                     isBankReceiptDialogOpen = false
-                    Toast.makeText(context, "✅ Receipt Synced! ${parsed.merchant} (${formatRupiah(parsed.amount)}) Saved to Supabase Database!", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "✅ Struk Gmail Berhasil Di-parse! ${parsed.merchant} (${formatRupiah(parsed.amount)}) Masuk Ke Purchases & Supabase! 📩", Toast.LENGTH_LONG).show()
                 }
             )
         }
@@ -1044,22 +1511,284 @@ fun TopNavbarHeader(onOpenAddDialog: () -> Unit) {
     }
 }
 
-// 2. Homebase 0: Economic Overview Redesigned 100% Matching Reference UI
+// Month Filtering Helpers & Composable Selector Bar
+fun parseYearMonthFromDate(dateStr: String): String {
+    if (dateStr.isBlank() || dateStr.lowercase() == "today") {
+        return java.text.SimpleDateFormat("yyyy-MM", Locale.US).format(java.util.Date())
+    }
+    val regexIso = Regex("""^(\d{4})-(\d{2})-(\d{2})$""")
+    val isoMatch = regexIso.find(dateStr.trim())
+    if (isoMatch != null) {
+        val (year, month) = isoMatch.destructured
+        return "$year-$month"
+    }
+
+    val lower = dateStr.lowercase()
+    val yearRegex = Regex("""\b(20\d{2})\b""")
+    val yearMatch = yearRegex.find(lower)
+    val year = yearMatch?.value ?: "2026"
+
+    val monthMap = mapOf(
+        "jan" to "01", "feb" to "02", "mar" to "03", "apr" to "04",
+        "mei" to "05", "may" to "05", "jun" to "06", "jul" to "07",
+        "aug" to "08", "agu" to "08", "sep" to "09", "okt" to "10",
+        "oct" to "10", "nov" to "11", "des" to "12", "dec" to "12"
+    )
+
+    var foundMonth = "08"
+    for ((key, code) in monthMap) {
+        if (lower.contains(key)) {
+            foundMonth = code
+            break
+        }
+    }
+    return "$year-$foundMonth"
+}
+
+fun getPaydayCycleMonth(dateStr: String, paydayDate: Int = 25): String {
+    val ym = parseYearMonthFromDate(dateStr)
+    val dayRegex = Regex("""\b(\d{1,2})\b""")
+    val match = dayRegex.find(dateStr.trim())
+    val day = match?.groupValues?.get(1)?.toIntOrNull() ?: 1
+
+    val parts = ym.split("-")
+    if (parts.size != 2) return ym
+    var y = parts[0].toInt()
+    var m = parts[1].toInt()
+
+    if (day >= paydayDate) {
+        m += 1
+        if (m > 12) {
+            m = 1
+            y += 1
+        }
+    }
+    return String.format(Locale.US, "%04d-%02d", y, m)
+}
+
+fun formatYearMonthDisplay(yearMonth: String): String {
+    val parts = yearMonth.split("-")
+    if (parts.size != 2) return yearMonth
+    val year = parts[0]
+    val monthNum = parts[1].toIntOrNull() ?: 8
+
+    val monthNamesFull = listOf("", "Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember")
+    val currentFull = monthNamesFull.getOrElse(monthNum) { parts[1] }
+
+    return "$currentFull $year"
+}
+
+fun formatPaydayRangeSubtext(yearMonth: String, paydayDate: Int = 25): String {
+    val parts = yearMonth.split("-")
+    if (parts.size != 2) return "• Siklus Gajian •"
+    val monthNum = parts[1].toIntOrNull() ?: 8
+
+    val monthNamesShort = listOf("", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agt", "Sep", "Okt", "Nov", "Des")
+    val currentShort = monthNamesShort.getOrElse(monthNum) { parts[1] }
+
+    val prevMonthNum = if (monthNum == 1) 12 else monthNum - 1
+    val prevShort = monthNamesShort.getOrElse(prevMonthNum) { "" }
+
+    val endDay = paydayDate - 1
+    return "• $paydayDate $prevShort - $endDay $currentShort •"
+}
+
+fun extractAvailableMonths(
+    transactions: List<TransactionModel>,
+    paydayDate: Int = 25,
+    isAutoNextMonthEnabled: Boolean = true
+): List<String> {
+    val cal = java.util.Calendar.getInstance()
+    val currentMonthKey = java.text.SimpleDateFormat("yyyy-MM", Locale.US).format(cal.time)
+    
+    cal.add(java.util.Calendar.MONTH, 1)
+    val nextMonthKey = java.text.SimpleDateFormat("yyyy-MM", Locale.US).format(cal.time)
+
+    val monthsFromTx = transactions.map { getPaydayCycleMonth(it.date, paydayDate) }.filter { it.isNotBlank() }
+    val baseList = if (isAutoNextMonthEnabled) {
+        monthsFromTx + listOf(nextMonthKey, currentMonthKey, "2026-08", "2026-07", "2026-06")
+    } else {
+        monthsFromTx + listOf(currentMonthKey, "2026-08", "2026-07", "2026-06")
+    }
+    return baseList.toSet().sortedDescending()
+}
+
+fun calculateBaseSalaryForMonth(
+    yearMonth: String,
+    baseSalary: Long,
+    isAutoPaydayEnabled: Boolean,
+    paydayDate: Int = 25,
+    firstSalaryMonth: String = "2026-07"
+): Long {
+    if (!isAutoPaydayEnabled) return 0L
+    if (yearMonth < firstSalaryMonth) return 0L
+
+    val calToday = java.util.Calendar.getInstance()
+    val currentYear = calToday.get(java.util.Calendar.YEAR)
+    val currentMonth = calToday.get(java.util.Calendar.MONTH) + 1
+    val currentDay = calToday.get(java.util.Calendar.DAY_OF_MONTH)
+    val currentYM = String.format(Locale.US, "%04d-%02d", currentYear, currentMonth)
+
+    if (yearMonth < currentYM) {
+        return baseSalary
+    }
+    if (yearMonth > currentYM) {
+        return 0L
+    }
+
+    return if (currentDay >= paydayDate) baseSalary else 0L
+}
+
+data class MonthBalanceResult(
+    val initialBalance: Long,
+    val baseSalary: Long,
+    val extraIncome: Long,
+    val totalIncome: Long,
+    val totalExpenses: Long,
+    val monthNetFlow: Long,
+    val closingBalance: Long
+)
+
+fun calculateAllMonthlyBalances(
+    transactions: List<TransactionModel>,
+    baseSalary: Long,
+    isAutoPaydayEnabled: Boolean,
+    paydayDate: Int = 25,
+    firstSalaryMonth: String = "2026-07"
+): Map<String, MonthBalanceResult> {
+    val availableMonthsAsc = extractAvailableMonths(transactions, paydayDate).sorted()
+    val resultMap = mutableMapOf<String, MonthBalanceResult>()
+
+    var runningCarryover = 0L
+
+    for (ym in availableMonthsAsc) {
+        val monthTxs = transactions.filter { getPaydayCycleMonth(it.date, paydayDate) == ym }
+        val expenses = monthTxs.filter { it.isExpense }.sumOf { it.amount }
+        val extraInc = monthTxs.filter { !it.isExpense }.sumOf { it.amount }
+
+        val salary = calculateBaseSalaryForMonth(
+            yearMonth = ym,
+            baseSalary = baseSalary,
+            isAutoPaydayEnabled = isAutoPaydayEnabled,
+            paydayDate = paydayDate,
+            firstSalaryMonth = firstSalaryMonth
+        )
+
+        val totIncome = salary + extraInc
+        val netFlow = totIncome - expenses
+        val initialBal = runningCarryover
+        val closingBal = initialBal + netFlow
+
+        resultMap[ym] = MonthBalanceResult(
+            initialBalance = initialBal,
+            baseSalary = salary,
+            extraIncome = extraInc,
+            totalIncome = totIncome,
+            totalExpenses = expenses,
+            monthNetFlow = netFlow,
+            closingBalance = closingBal
+        )
+
+        runningCarryover = closingBal
+    }
+
+    return resultMap
+}
+
+@Composable
+fun SleekMonthSelectorBar(
+    selectedYearMonth: String,
+    availableMonths: List<String>,
+    paydayDate: Int = 25,
+    onMonthSelected: (String) -> Unit
+) {
+    val currentIndex = availableMonths.indexOf(selectedYearMonth)
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp)),
+        color = Color(0xFF16191E),
+        border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = {
+                    if (currentIndex < availableMonths.size - 1) {
+                        onMonthSelected(availableMonths[currentIndex + 1])
+                    }
+                },
+                enabled = currentIndex < availableMonths.size - 1,
+                modifier = Modifier.size(34.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ChevronLeft,
+                    contentDescription = "Previous Month",
+                    tint = if (currentIndex < availableMonths.size - 1) SageGreen else Color.DarkGray
+                )
+            }
+
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(imageVector = Icons.Default.CalendarToday, contentDescription = "Calendar", tint = SageGreen, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = formatYearMonthDisplay(selectedYearMonth),
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Text(
+                    text = formatPaydayRangeSubtext(selectedYearMonth, paydayDate),
+                    color = SageGreen,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            IconButton(
+                onClick = {
+                    if (currentIndex > 0) {
+                        onMonthSelected(availableMonths[currentIndex - 1])
+                    }
+                },
+                enabled = currentIndex > 0,
+                modifier = Modifier.size(34.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = "Next Month",
+                    tint = if (currentIndex > 0) SageGreen else Color.DarkGray
+                )
+            }
+        }
+    }
+}
+
+// 2. Homebase 0: Economic Overview
 @Composable
 fun EconomicOverviewHomebase(
-    totalExpenses: Long,
     totalIncome: Long,
     categories: List<AllocationCategoryModel>,
     transactions: List<TransactionModel>,
-    quickActions: List<QuickActionModel>,
     isRefreshingEmail: Boolean,
-    recipientEmail: String,
-    onRefreshEmail: () -> Unit,
-    onOpenAddDialog: () -> Unit,
-    onQuickAdd: (String, Long, String) -> Unit
+    onRefreshEmail: (Int) -> Unit
 ) {
-    val activeCategories = categories.filter { it.percentage > 0 }
+    var isConfirmScan20DialogOpen by remember { mutableStateOf(false) }
+    var isOverviewAscending by remember { mutableStateOf(true) }
+
     val expenseTransactions = transactions.filter { it.isExpense }
+    val overallExpenses = expenseTransactions.sumOf { it.amount }
+    val overallRemainingBudget = (totalIncome - overallExpenses).coerceAtLeast(0L)
+
+    val activeCategories = categories.filter { it.percentage > 0 }
 
     // Map each category directly to its total actual expense spent
     val categoryExpenses = categories.map { cat ->
@@ -1105,11 +1834,11 @@ fun EconomicOverviewHomebase(
                     // Base ring background
                     drawCircle(color = Color(0xFF16191E), style = Stroke(width = strokeWidth))
                     
-                    if (totalExpenses > 0) {
+                    if (overallExpenses > 0) {
                         var currentStartAngle = -90f
                         categoryExpenses.forEach { (cat, spent) ->
                             if (spent > 0) {
-                                val sweepAngle = (spent.toFloat() / totalExpenses.toFloat()) * 360f
+                                val sweepAngle = (spent.toFloat() / overallExpenses.toFloat()) * 360f
                                 drawArc(
                                     color = cat.color,
                                     startAngle = currentStartAngle,
@@ -1123,15 +1852,16 @@ fun EconomicOverviewHomebase(
                     }
                 }
 
-                // Center Ring Text
+                // Center Ring Text: Remaining Budget Available (Total Income - Total Expenses)
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(text = "Total Spending", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(text = formatRupiah(totalExpenses), color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Black)
+                    Text(text = "REMAINING BUDGET", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text(text = "Of Income", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(text = formatRupiah(totalIncome), color = SageGreen, fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
+                    Text(text = formatRupiah(overallRemainingBudget), color = PastelGold, fontSize = 24.sp, fontWeight = FontWeight.Black)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(text = "Spent: ", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                        Text(text = formatRupiah(overallExpenses), color = Color(0xFFEF5350), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }
@@ -1151,7 +1881,7 @@ fun EconomicOverviewHomebase(
                                 val matchedCat = matchCategoryForTransaction(tx.category, categories)
                                 matchedCat?.id == cat.id
                             }.sumOf { it.amount }
-                            val usagePct = if (totalExpenses > 0) ((spent.toDouble() / totalExpenses.toDouble()) * 100).toInt() else 0
+                            val usagePct = if (overallExpenses > 0) ((spent.toDouble() / overallExpenses.toDouble()) * 100).toInt() else 0
 
                             SleekLegendBarItem(
                                 label = cat.name.split(" ")[0],
@@ -1169,22 +1899,26 @@ fun EconomicOverviewHomebase(
             }
         }
 
-        // Email Sync Bar
+        // Email Sync Bar: 2 Side-by-Side Cards (Left: Scan 20 [Dark], Right: Scan [Full Neon Green])
         item {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(20.dp))
-                    .clickable { onRefreshEmail() },
-                color = DarkCard,
-                border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(20.dp)
             ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                // LEFT CARD: Scan 20 (Secondary Action - Dark Background)
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable(enabled = !isRefreshingEmail) { isConfirmScan20DialogOpen = true },
+                    color = DarkCard,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
                         Box(
                             modifier = Modifier
                                 .size(36.dp)
@@ -1193,49 +1927,97 @@ fun EconomicOverviewHomebase(
                             contentAlignment = Alignment.Center
                         ) {
                             if (isRefreshingEmail) {
-                                CircularProgressIndicator(color = SageGreen, modifier = Modifier.size(18.dp))
+                                CircularProgressIndicator(color = SageGreen, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                             } else {
-                                Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh Email", tint = SageGreen, modifier = Modifier.size(20.dp))
+                                Icon(imageVector = Icons.Default.MarkEmailRead, contentDescription = "Scan 20 Emails", tint = SageGreen, modifier = Modifier.size(18.dp))
                             }
                         }
-                        Spacer(modifier = Modifier.width(12.dp))
                         Column {
-                            Text(text = "Sync & Scan Email Receipts", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                            Text(text = "Pindai struk dari $recipientEmail", color = Color.Gray, fontSize = 10.sp)
+                            Text(text = "Bulk Scan", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                            Text(text = "Scan 20 Email", color = Color.Gray, fontSize = 10.sp)
                         }
                     }
-                    Surface(
-                        color = Color(0x225EB893),
-                        shape = RoundedCornerShape(10.dp)
+                }
+
+                // RIGHT CARD: Scan 1 (Primary Action - Full Neon Sage Green Background)
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable(enabled = !isRefreshingEmail) { onRefreshEmail(1) },
+                    color = SageGreen,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, SageGreen)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text(
-                            text = if (isRefreshingEmail) "Scanning..." else "Sync",
-                            color = SageGreen,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                        )
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF0A0C0F).copy(alpha = 0.15f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (isRefreshingEmail) {
+                                CircularProgressIndicator(color = Color(0xFF0A0C0F), modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(imageVector = Icons.Default.Refresh, contentDescription = "Scan 1 Email", tint = Color(0xFF0A0C0F), modifier = Modifier.size(18.dp))
+                            }
+                        }
+                        Column {
+                            Text(text = "Scan", color = Color(0xFF0A0C0F), fontSize = 15.sp, fontWeight = FontWeight.Black)
+                            Text(text = "Scan Email", color = Color(0xFF0A0C0F).copy(alpha = 0.7f), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
         }
 
+
         // "Last Transaction & Input" Section matching Reference UI
         item {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "Last Transaction & Input", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Surface(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { isOverviewAscending = !isOverviewAscending },
+                    color = Color(0xFF1C2026),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x445EB893))
                 ) {
-                    Text(text = "Last Transaction & Input", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    Text(text = "See All", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = if (isOverviewAscending) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
+                            contentDescription = "Sort Order",
+                            tint = SageGreen,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (isOverviewAscending) "Ascending" else "Descending",
+                            color = SageGreen,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
+            }
 
-                if (transactions.isEmpty()) {
-                    Text("No recent transactions.", color = Color.Gray, fontSize = 12.sp)
-                } else {
-                    transactions.take(6).forEach { tx ->
+            if (transactions.isEmpty()) {
+                Text("No recent transactions.", color = Color.Gray, fontSize = 12.sp)
+            } else {
+                val displayOverviewList = if (isOverviewAscending) transactions else transactions.reversed()
+                displayOverviewList.take(6).forEach { tx ->
                         Surface(
                             modifier = Modifier.fillMaxWidth(),
                             color = DarkCard,
@@ -1303,6 +2085,44 @@ fun EconomicOverviewHomebase(
             }
         }
     }
+
+    // Confirmation Dialog for Scan 20 Emails
+    if (isConfirmScan20DialogOpen) {
+        AlertDialog(
+            onDismissRequest = { isConfirmScan20DialogOpen = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(imageVector = Icons.Default.Warning, contentDescription = "Warning", tint = PastelGold, modifier = Modifier.size(22.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Konfirmasi Scan 20 Email", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                }
+            },
+            text = {
+                Text(
+                    text = "Are you sure you want to scan 20 emails at once?",
+                    color = Color.LightGray,
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        isConfirmScan20DialogOpen = false
+                        onRefreshEmail(20)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = SageGreen, contentColor = Color(0xFF0A0C0F))
+                ) {
+                    Text("Yes", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { isConfirmScan20DialogOpen = false }) {
+                    Text("Cancel", color = Color.Gray)
+                }
+            },
+            containerColor = DarkCard
+        )
+    }
 }
 
 @Composable
@@ -1336,55 +2156,107 @@ fun SleekLegendBarItem(label: String, usagePercentText: String, usageFraction: F
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WalletsHomebase(
-    totalIncome: Long,
-    totalExpenses: Long,
-    totalExtraIncome: Long,
+    baseSalary: Long,
+    isAutoPaydayEnabled: Boolean,
+    isAutoNextMonthEnabled: Boolean = true,
+    paydayDate: Int,
+    salaryStartMonth: String = "2026-07",
     transactions: List<TransactionModel>,
     categories: List<AllocationCategoryModel>,
-    onOpenBankSyncDialog: () -> Unit = {},
-    onCopySqlFix: () -> Unit,
     onUpdateTransaction: (TransactionModel) -> Unit,
     onDeleteTransaction: (TransactionModel) -> Unit
 ) {
-    val overallRemaining = totalIncome - totalExpenses
     var transactionToDelete by remember { mutableStateOf<TransactionModel?>(null) }
     var transactionToEdit by remember { mutableStateOf<TransactionModel?>(null) }
+    var isAscendingOrder by remember { mutableStateOf(true) }
+
+    val availableMonths = remember(transactions, paydayDate, isAutoNextMonthEnabled) { 
+        extractAvailableMonths(transactions, paydayDate, isAutoNextMonthEnabled) 
+    }
+    var selectedYearMonth by remember { mutableStateOf(availableMonths.firstOrNull() ?: "2026-08") }
+
+    val monthlyBalancesMap = remember(transactions, baseSalary, isAutoPaydayEnabled, paydayDate, salaryStartMonth) {
+        calculateAllMonthlyBalances(
+            transactions = transactions,
+            baseSalary = baseSalary,
+            isAutoPaydayEnabled = isAutoPaydayEnabled,
+            paydayDate = paydayDate,
+            firstSalaryMonth = salaryStartMonth
+        )
+    }
+
+    val currentMonthData = monthlyBalancesMap[selectedYearMonth] ?: MonthBalanceResult(0, 0, 0, 0, 0, 0, 0)
+
+    val monthInitialBalance = currentMonthData.initialBalance
+    val monthBaseSalary = currentMonthData.baseSalary
+    val monthExtraIncome = currentMonthData.extraIncome
+    val monthTotalIncome = currentMonthData.totalIncome
+    val monthTotalExpenses = currentMonthData.totalExpenses
+    val monthNetFlow = currentMonthData.monthNetFlow
+    val monthClosingBalance = currentMonthData.closingBalance
+
+    val monthTransactions = transactions.filter { getPaydayCycleMonth(it.date, paydayDate) == selectedYearMonth }
+    val monthExpenseTransactions = monthTransactions.filter { it.isExpense }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Month Selector Bar
+        item {
+            SleekMonthSelectorBar(
+                selectedYearMonth = selectedYearMonth,
+                availableMonths = availableMonths,
+                paydayDate = paydayDate,
+                onMonthSelected = { selectedYearMonth = it }
+            )
+        }
+
+        // Redesigned Top Card: Monthly Financial Performance & Closing Balance Snapshot
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = SageGreen,
-                shape = RoundedCornerShape(26.dp)
+                color = DarkCard,
+                shape = RoundedCornerShape(26.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, if (monthClosingBalance >= 0) SageGreen.copy(alpha = 0.4f) else BlushPink.copy(alpha = 0.4f))
             ) {
                 Column(modifier = Modifier.padding(22.dp)) {
-                    Text(text = "Total Cash & Overall Balance", color = Color(0xFF0A0C0F), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    Text(text = formatRupiah(overallRemaining), color = Color(0xFF0A0C0F), fontSize = 28.sp, fontWeight = FontWeight.Black)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(text = "Final Balance (${formatYearMonthDisplay(selectedYearMonth)})", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Surface(
+                            color = if (monthClosingBalance >= 0) Color(0x225EB893) else Color(0x22F2C2C2),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text(
+                                text = if (monthClosingBalance >= 0) "🟢 Plus" else "🔴 Deficit",
+                                color = if (monthClosingBalance >= 0) SageGreen else BlushPink,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = if (monthClosingBalance >= 0) "+ ${formatRupiah(monthClosingBalance)}" else "- ${formatRupiah(-monthClosingBalance)}",
+                        color = if (monthClosingBalance >= 0) SageGreen else BlushPink,
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Black
+                    )
                     Spacer(modifier = Modifier.height(14.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(text = "Total Income: ${formatRupiah(totalIncome)}", color = Color(0xFF0A0C0F), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        Text(text = "Spent: ${formatRupiah(totalExpenses)}", color = Color(0xFF0A0C0F), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(text = "Opening Balance: ${formatRupiah(monthInitialBalance)}", color = Color.LightGray, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(text = "Net Flow: ${if (monthNetFlow >= 0) "+" else ""}${formatRupiah(monthNetFlow)}", color = Color.LightGray, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
         }
 
-        item {
-            Button(
-                onClick = onOpenBankSyncDialog,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1D2128), contentColor = SageGreen),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth().height(48.dp)
-            ) {
-                Icon(imageVector = Icons.Default.MarkEmailRead, contentDescription = "Email Sync", modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(text = "📩 Sync Mandiri / Bank Email Receipts", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-
+        // Monthly Cash Flow Breakdown
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -1393,33 +2265,28 @@ fun WalletsHomebase(
                 border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
             ) {
                 Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(text = "Cash Flow Summary", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                        Button(
-                            onClick = onCopySqlFix,
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1D2128), contentColor = SageGreen),
-                            shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.ContentCopy, contentDescription = "Copy SQL", modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Copy RLS Policy SQL", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
+                    Text(text = "Cash Flow Summary", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                     HorizontalDivider(color = DarkCardBorder, modifier = Modifier.padding(vertical = 4.dp))
-                    SummaryRow("Total Base Salary", formatRupiah(totalIncome - totalExtraIncome), SageGreen)
-                    SummaryRow("Total Extra / Non-Salary Income", "+ ${formatRupiah(totalExtraIncome)}", SageGreen)
-                    SummaryRow("Total Spent Expenses", "- ${formatRupiah(totalExpenses)}", BlushPink)
-                    SummaryRow("Net Cash Balance", formatRupiah(overallRemaining), SoftBlue)
+                    SummaryRow(
+                        title = "Opening Balance",
+                        amount = formatRupiah(monthInitialBalance),
+                        color = if (monthInitialBalance >= 0) SageGreen else BlushPink
+                    )
+                    SummaryRow(
+                        title = "Base Salary",
+                        amount = formatRupiah(monthBaseSalary),
+                        color = if (monthBaseSalary > 0) SageGreen else Color.Gray
+                    )
+                    SummaryRow("Extra Income", "+ ${formatRupiah(monthExtraIncome)}", SageGreen)
+                    SummaryRow("Total Monthly Expenses", "- ${formatRupiah(monthTotalExpenses)}", BlushPink)
+                    SummaryRow("Net Cash Flow This Month", if (monthNetFlow >= 0) "+ ${formatRupiah(monthNetFlow)}" else "- ${formatRupiah(-monthNetFlow)}", if (monthNetFlow >= 0) SageGreen else BlushPink)
+                    HorizontalDivider(color = DarkCardBorder, modifier = Modifier.padding(vertical = 4.dp))
+                    SummaryRow("Total Closing Balance", formatRupiah(monthClosingBalance), if (monthClosingBalance >= 0) SageGreen else BlushPink)
                 }
             }
         }
 
-        // Detailed Allocation Breakdown Section with Percentage, Spent & Remaining Budget
+        // Detailed Allocation Breakdown Section for selected month
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -1434,17 +2301,19 @@ fun WalletsHomebase(
                     Text(text = "Detailed Allocation & Budget Usage", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                     HorizontalDivider(color = DarkCardBorder)
 
-                    val expenseTx = transactions.filter { it.isExpense }
                     categories.filter { it.percentage > 0 }.forEach { cat ->
-                        val spent = expenseTx.filter { tx ->
+                        val spent = monthExpenseTransactions.filter { tx ->
                             val matched = matchCategoryForTransaction(tx.category, categories)
                             matched?.id == cat.id
                         }.sumOf { it.amount }
 
-                        val allocated = (totalIncome * cat.percentage) / 100
+                        val budgetBase = if (baseSalary > 0) baseSalary else if (monthBaseSalary > 0) monthBaseSalary else maxOf(monthTotalIncome, 10000000L)
+                        val allocated = (budgetBase * cat.percentage) / 100
                         val remaining = allocated - spent
                         val usagePercent = if (allocated > 0) ((spent.toDouble() / allocated.toDouble()) * 100).toInt() else 0
                         val progress = if (allocated > 0) (spent.toFloat() / allocated.toFloat()).coerceIn(0f, 1f) else 0f
+                        val isOverBudget = usagePercent > 100
+                        val activeBarColor = if (isOverBudget) BlushPink else cat.color
 
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Row(
@@ -1457,12 +2326,17 @@ fun WalletsHomebase(
                                         modifier = Modifier
                                             .size(10.dp)
                                             .clip(CircleShape)
-                                            .background(cat.color)
+                                            .background(activeBarColor)
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(text = "${cat.name} (${cat.percentage}%)", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                 }
-                                Text(text = "$usagePercent% spent", color = cat.color, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                Text(
+                                    text = if (isOverBudget) "⚠️ $usagePercent% spent" else "$usagePercent% spent",
+                                    color = activeBarColor,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
                             }
 
                             // Progress Bar
@@ -1476,7 +2350,7 @@ fun WalletsHomebase(
                                     modifier = Modifier
                                         .fillMaxHeight()
                                         .fillMaxWidth(progress.coerceAtLeast(0.03f))
-                                        .background(cat.color, CircleShape)
+                                        .background(activeBarColor, CircleShape)
                                 )
                             }
 
@@ -1505,25 +2379,48 @@ fun WalletsHomebase(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(text = "Financial & Transaction History", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                Surface(color = Color(0xFF1C2026), shape = RoundedCornerShape(10.dp)) {
-                    Text(
-                        text = "${transactions.size} Items",
-                        color = Color.Gray,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                    )
+                Column {
+                    Text(text = "Financial & Transaction History", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Text(text = "${monthTransactions.size} Items", color = Color.Gray, fontSize = 11.sp)
+                }
+
+                // Interactive Sort Order Toggle Button (Ascending ⬆️ / Descending ⬇️)
+                Surface(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { isAscendingOrder = !isAscendingOrder },
+                    color = Color(0xFF1C2026),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x445EB893))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = if (isAscendingOrder) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
+                            contentDescription = "Sort Order",
+                            tint = SageGreen,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (isAscendingOrder) "Ascending" else "Descending",
+                            color = SageGreen,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
         }
 
-        if (transactions.isEmpty()) {
+        val displayTransactions = if (isAscendingOrder) monthTransactions else monthTransactions.reversed()
+        if (displayTransactions.isEmpty()) {
             item {
                 Text("No transaction history found.", color = Color.Gray, fontSize = 12.sp)
             }
         } else {
-            items(transactions) { tx ->
+            items(displayTransactions) { tx ->
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     color = DarkCard,
@@ -1598,7 +2495,7 @@ fun WalletsHomebase(
 
         AlertDialog(
             onDismissRequest = { transactionToEdit = null },
-            title = { Text("✏️ Edit Transaction (Sync DB)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+            title = { Text("Edit Transaction", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
@@ -1615,7 +2512,7 @@ fun WalletsHomebase(
                                 .clickable { editIsExpense = true },
                             color = if (editIsExpense) BlushPink else Color.Transparent
                         ) {
-                            Text("🔴 Expense", color = if (editIsExpense) Color(0xFF0A0C0F) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, modifier = Modifier.padding(vertical = 8.dp))
+                            Text("Expense", color = if (editIsExpense) Color(0xFF0A0C0F) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, modifier = Modifier.padding(vertical = 8.dp))
                         }
 
                         Surface(
@@ -1625,7 +2522,7 @@ fun WalletsHomebase(
                                 .clickable { editIsExpense = false },
                             color = if (!editIsExpense) SageGreen else Color.Transparent
                         ) {
-                            Text("🟢 Extra Income", color = if (!editIsExpense) Color(0xFF0A0C0F) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, modifier = Modifier.padding(vertical = 8.dp))
+                            Text("Extra Income", color = if (!editIsExpense) Color(0xFF0A0C0F) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, modifier = Modifier.padding(vertical = 8.dp))
                         }
                     }
 
@@ -1753,8 +2650,9 @@ fun SummaryRow(title: String, amount: String, color: Color) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(text = title, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-        Text(text = amount, color = color, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+        Text(text = title, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f, fill = false))
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(text = amount, color = color, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1)
     }
 }
 
@@ -1765,12 +2663,14 @@ fun SalaryAllocationHomebase(
     onSalaryChange: (Long) -> Unit,
     isAutoPaydayEnabled: Boolean,
     onAutoPaydayToggle: (Boolean) -> Unit,
+    isAutoNextMonthEnabled: Boolean = true,
+    onAutoNextMonthToggle: (Boolean) -> Unit = {},
     paydayDate: Int,
     onPaydayDateChange: (Int) -> Unit,
-    onTriggerPaydayNow: () -> Unit,
     categories: List<AllocationCategoryModel>,
     onAddCategory: (String, Int) -> Unit,
     onDeleteCategory: (AllocationCategoryModel) -> Unit,
+    onSaveCategories: () -> Unit = {},
     transactions: List<TransactionModel>
 ) {
     val context = LocalContext.current
@@ -1817,6 +2717,24 @@ fun SalaryAllocationHomebase(
 
                     HorizontalDivider(color = DarkCardBorder)
 
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = "Auto-Generate Next Month Cycle", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            Text(text = "Include upcoming month cycle in selector", color = Color.Gray, fontSize = 11.sp)
+                        }
+                        Switch(
+                            checked = isAutoNextMonthEnabled,
+                            onCheckedChange = onAutoNextMonthToggle,
+                            colors = SwitchDefaults.colors(checkedThumbColor = SageGreen, checkedTrackColor = Color(0x335EB893))
+                        )
+                    }
+
+                    HorizontalDivider(color = DarkCardBorder)
+
                     OutlinedTextField(
                         value = paydayDateInput,
                         onValueChange = {
@@ -1831,20 +2749,28 @@ fun SalaryAllocationHomebase(
                         modifier = Modifier.fillMaxWidth()
                     )
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                    Text(text = "Next Payday: Day $paydayDate This Month", color = SageGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Button(
+                        onClick = {
+                            paydayDateInput.toIntOrNull()?.let { dateNum ->
+                                if (dateNum in 1..31) {
+                                    onPaydayDateChange(dateNum)
+                                    Toast.makeText(context, "Payday Date $dateNum Saved!.", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, "Please Input A Valid Payday Date", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = SageGreen, contentColor = Color(0xFF0A0C0F)),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth().height(46.dp)
                     ) {
-                        Text(text = "Next Payday: Day $paydayDate This Month", color = SageGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        Button(
-                            onClick = onTriggerPaydayNow,
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1D2128), contentColor = SageGreen),
-                            shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                        ) {
-                            Text("Simulate Payday", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        }
+                        Icon(imageVector = Icons.Default.Save, contentDescription = "Save", modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Save Payday Date Settings", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -1891,6 +2817,23 @@ fun SalaryAllocationHomebase(
                         colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = SageGreen, unfocusedBorderColor = Color.Gray, focusedTextColor = Color.White, unfocusedTextColor = Color.White),
                         modifier = Modifier.fillMaxWidth()
                     )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Button(
+                        onClick = {
+                            val num = parseInputNumber(salaryInput)
+                            onSalaryChange(num)
+                            Toast.makeText(context, "Nett Salary ${formatRupiah(num)} Saved!.", Toast.LENGTH_SHORT).show()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = SageGreen, contentColor = Color(0xFF0A0C0F)),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth().height(46.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Save, contentDescription = "Save Salary", modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Save Base Salary Settings", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }
@@ -2059,7 +3002,8 @@ fun SalaryAllocationHomebase(
                                 saveErrorMessage = "Save Failed! Total allocation is $totalPercentSum% (Exceeds 100% by ${totalPercentSum - 100}%)"
                             } else {
                                 saveErrorMessage = ""
-                                Toast.makeText(context, "Successfully saved 100% Allocation to Supabase Database! 💾", Toast.LENGTH_LONG).show()
+                                onSaveCategories()
+                                Toast.makeText(context, "Salary allocation saved successfully.", Toast.LENGTH_LONG).show()
                             }
                         },
                         colors = ButtonDefaults.buttonColors(
@@ -2139,6 +3083,8 @@ fun SavingsHomebase(
     onSavingsCategoriesChanged: (List<String>) -> Unit,
     wishlists: List<WishlistMilestoneModel>,
     onAddWishlist: (String, Long, Long) -> Unit,
+    onUpdateWishlist: (WishlistMilestoneModel) -> Unit,
+    onDeleteWishlist: (WishlistMilestoneModel) -> Unit,
     transactions: List<TransactionModel>,
     onDepositSavings: (String, Long, String) -> Unit
 ) {
@@ -2146,8 +3092,9 @@ fun SavingsHomebase(
     var isSelectCategoryDialogOpen by remember { mutableStateOf(false) }
     var isAddWishlistDialogOpen by remember { mutableStateOf(false) }
     var isAddDepositDialogOpen by remember { mutableStateOf(false) }
+    var wishlistToEdit by remember { mutableStateOf<WishlistMilestoneModel?>(null) }
 
-    // Calculate total accumulated savings
+    // Calculate total accumulated savings (Only accumulates from actual deposits/transactions under assigned savings categories)
     val activeSavingsCategories = categories.filter { selectedSavingsCategoryIds.contains(it.id) }
     val totalMonthlySavingsAllocated = activeSavingsCategories.sumOf { (baseSalary * it.percentage) / 100 }
     
@@ -2158,11 +3105,12 @@ fun SavingsHomebase(
             val catName = categories.find { c -> c.id == id }?.name ?: ""
             catName.isNotBlank() && (tx.category.lowercase().contains(catName.lowercase()) || catName.lowercase().contains(tx.category.lowercase()))
         }
-        isMatchedById || isMatchedByName
+        val isGenericSavings = tx.category.lowercase().contains("tabungan") || tx.category.lowercase().contains("savings") || tx.category.lowercase().contains("investment")
+        isMatchedById || isMatchedByName || isGenericSavings
     }
 
-    val totalDepositsSum = transactions.filter { !it.isExpense && (it.category.lowercase().contains("tabungan") || it.category.lowercase().contains("savings") || it.category.lowercase().contains("investment")) }.sumOf { it.amount }
-    val totalSavingsBalance = totalMonthlySavingsAllocated + totalDepositsSum
+    // Accumulated Savings is strictly based on actual recorded deposits and savings transactions (starts at 0 if no transactions exist)
+    val totalSavingsBalance = savingsHistoryTransactions.sumOf { it.amount }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -2244,7 +3192,7 @@ fun SavingsHomebase(
                                     ) {
                                         Icon(imageVector = Icons.Default.Tune, contentDescription = "Classify", tint = SageGreen, modifier = Modifier.size(16.dp))
                                         Spacer(modifier = Modifier.width(6.dp))
-                                        Text("Classifications", color = SageGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                        Text("Assign", color = SageGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                     }
                                 }
 
@@ -2260,7 +3208,7 @@ fun SavingsHomebase(
                                     ) {
                                         Icon(imageVector = Icons.Default.Savings, contentDescription = "Deposit", tint = PastelGold, modifier = Modifier.size(16.dp))
                                         Spacer(modifier = Modifier.width(6.dp))
-                                        Text("+ Deposit", color = PastelGold, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                        Text("Deposit", color = PastelGold, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                     }
                                 }
                             }
@@ -2296,11 +3244,13 @@ fun SavingsHomebase(
                     contentPadding = PaddingValues(end = 16.dp)
                 ) {
                     items(wishlists) { item ->
-                        val pct = if (item.targetAmount > 0) ((item.currentSaved.toDouble() / item.targetAmount.toDouble()) * 100).toInt() else 0
+                        val effectiveSaved = totalSavingsBalance
+                        val pct = if (item.targetAmount > 0) ((effectiveSaved.toDouble() / item.targetAmount.toDouble()) * 100).toInt() else 0
                         Surface(
                             modifier = Modifier
                                 .width(200.dp)
-                                .height(130.dp),
+                                .height(130.dp)
+                                .clickable { wishlistToEdit = item },
                             color = item.color.copy(alpha = 0.25f),
                             shape = RoundedCornerShape(22.dp),
                             border = androidx.compose.foundation.BorderStroke(1.dp, item.color.copy(alpha = 0.5f))
@@ -2321,7 +3271,7 @@ fun SavingsHomebase(
                                 }
 
                                 Column {
-                                    Text(text = formatRupiah(item.currentSaved), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Black)
+                                    Text(text = formatRupiah(effectiveSaved), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Black)
                                     Text(text = "Target: ${formatRupiah(item.targetAmount)}", color = Color.LightGray, fontSize = 10.sp)
                                 }
 
@@ -2617,6 +3567,105 @@ fun SavingsHomebase(
             containerColor = DarkCard
         )
     }
+
+    // Dialog 4: Edit & Delete Wishlist Goal
+    if (wishlistToEdit != null) {
+        val targetItem = wishlistToEdit!!
+        var goalTitle by remember(targetItem) { mutableStateOf(targetItem.title) }
+        var targetAmountText by remember(targetItem) { mutableStateOf(formatInputNumber(targetItem.targetAmount.toString())) }
+        var isConfirmDeleteWishlist by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { wishlistToEdit = null },
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Edit Wishlist Goal", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    IconButton(onClick = { isConfirmDeleteWishlist = true }, modifier = Modifier.size(28.dp)) {
+                        Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = BlushPink, modifier = Modifier.size(20.dp))
+                    }
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (isConfirmDeleteWishlist) {
+                        Text("Are you sure you want to delete wishlist \"${targetItem.title}\" from app & Supabase database?", color = BlushPink, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    } else {
+                        OutlinedTextField(
+                            value = goalTitle,
+                            onValueChange = { goalTitle = it },
+                            label = { Text("Wishlist Title", color = Color.Gray) },
+                            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = SageGreen, unfocusedBorderColor = Color.Gray, focusedTextColor = Color.White, unfocusedTextColor = Color.White),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = targetAmountText,
+                            onValueChange = { targetAmountText = formatInputNumber(it) },
+                            label = { Text("Target Amount (Rp)", color = Color.Gray) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = SageGreen, unfocusedBorderColor = Color.Gray, focusedTextColor = Color.White, unfocusedTextColor = Color.White),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = formatInputNumber(totalSavingsBalance.toString()),
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Current Saved (Synced to Total Savings)", color = SageGreen) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = SageGreen, unfocusedBorderColor = Color.Gray, focusedTextColor = Color.White, unfocusedTextColor = Color.White),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                if (isConfirmDeleteWishlist) {
+                    Button(
+                        onClick = {
+                            onDeleteWishlist(targetItem)
+                            wishlistToEdit = null
+                            Toast.makeText(context, "Wishlist \"${targetItem.title}\" deleted successfully.", Toast.LENGTH_SHORT).show()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = BlushPink, contentColor = Color(0xFF0A0C0F))
+                    ) {
+                        Text("Delete Wishlist", fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    Button(
+                        onClick = {
+                            val target = parseInputNumber(targetAmountText)
+                            if (goalTitle.isNotBlank() && target > 0) {
+                                val updated = WishlistMilestoneModel(
+                                    id = targetItem.id,
+                                    title = goalTitle,
+                                    targetAmount = target,
+                                    currentSaved = totalSavingsBalance,
+                                    color = targetItem.color
+                                )
+                                onUpdateWishlist(updated)
+                                wishlistToEdit = null
+                                Toast.makeText(context, "Wishlist \"$goalTitle\" updated successfully.", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = SageGreen, contentColor = Color(0xFF0A0C0F))
+                    ) {
+                        Text("Save Changes", fontWeight = FontWeight.Bold)
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { 
+                    if (isConfirmDeleteWishlist) isConfirmDeleteWishlist = false else wishlistToEdit = null 
+                }) {
+                    Text("Cancel", color = Color.Gray)
+                }
+            },
+            containerColor = DarkCard
+        )
+    }
 }
 
 // 5. Homebase 3: Single Master Password Control & Real Live Active Connection Indicators
@@ -2637,11 +3686,9 @@ fun SettingsHomebase(
     isEmailServiceActive: Boolean,
     onEmailServiceActiveChange: (Boolean) -> Unit,
     emailApiKey: String,
-    onEmailApiKeyChange: (String) -> Unit,
+    onEmailApiKeyChange: (String) -> Unit = {},
     recipientEmail: String,
-    onRecipientEmailChange: (String) -> Unit,
-    emailProvider: String,
-    onEmailProviderChange: (String) -> Unit,
+    onRecipientEmailChange: (String) -> Unit = {},
     isEmailConnected: Boolean,
     isTestingEmailConnection: Boolean,
     onTestSendEmail: () -> Unit
@@ -2658,7 +3705,7 @@ fun SettingsHomebase(
     var confirmPassInput by remember { mutableStateOf("") }
     var changePassErrorMsg by remember { mutableStateOf("") }
 
-    val isEmailFullyActive = isEmailServiceActive && isEmailConnected && emailApiKey.isNotBlank() && recipientEmail.isNotBlank()
+    val isEmailFullyActive = isEmailServiceActive && isEmailConnected && (emailApiKey.isNotBlank() || recipientEmail.isNotBlank())
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -2798,9 +3845,10 @@ fun SettingsHomebase(
                         HorizontalDivider(color = DarkCardBorder)
 
                         OutlinedTextField(
-                            value = emailProvider,
-                            onValueChange = onEmailProviderChange,
-                            label = { Text("Email Service Provider", color = Color.Gray) },
+                            value = recipientEmail,
+                            onValueChange = onRecipientEmailChange,
+                            label = { Text("Recipient Email Address", color = Color.Gray) },
+                            placeholder = { Text("e.g. user@gmail.com", color = Color.Gray) },
                             colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = SageGreen, unfocusedBorderColor = Color.Gray, focusedTextColor = Color.White, unfocusedTextColor = Color.White),
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -2808,16 +3856,8 @@ fun SettingsHomebase(
                         OutlinedTextField(
                             value = emailApiKey,
                             onValueChange = onEmailApiKeyChange,
-                            placeholder = { Text("Enter your Resend / SendGrid API Key", color = Color.Gray) },
-                            label = { Text("Email API Key", color = Color.Gray) },
-                            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = SageGreen, unfocusedBorderColor = Color.Gray, focusedTextColor = Color.White, unfocusedTextColor = Color.White),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        OutlinedTextField(
-                            value = recipientEmail,
-                            onValueChange = onRecipientEmailChange,
-                            label = { Text("Target Email for Reports & Receipts", color = Color.Gray) },
+                            label = { Text("Google OAuth Client ID", color = Color.Gray) },
+                            placeholder = { Text("e.g. 123456-abc.apps.googleusercontent.com", color = Color.Gray) },
                             colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = SageGreen, unfocusedBorderColor = Color.Gray, focusedTextColor = Color.White, unfocusedTextColor = Color.White),
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -2826,8 +3866,8 @@ fun SettingsHomebase(
                             onClick = onTestSendEmail,
                             enabled = !isTestingEmailConnection,
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isEmailFullyActive) SageGreen else Color(0xFF1D2128),
-                                contentColor = if (isEmailFullyActive) Color(0xFF0A0C0F) else Color.Gray
+                                containerColor = SageGreen,
+                                contentColor = Color(0xFF0A0C0F)
                             ),
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier.fillMaxWidth().height(48.dp)
@@ -2835,23 +3875,40 @@ fun SettingsHomebase(
                             if (isTestingEmailConnection) {
                                 CircularProgressIndicator(color = Color(0xFF0A0C0F), modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text(text = "Testing Live Connection...", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                Text(text = "Verifying Google Cloud OAuth...", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                             } else {
-                                Icon(imageVector = Icons.Default.Send, contentDescription = "Send", modifier = Modifier.size(18.dp))
+                                Icon(imageVector = Icons.Default.CheckCircle, contentDescription = "Verify", modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text(text = "Test & Save Email Connection", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                Text(text = "Verify Google Cloud Services Connection", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
                         }
 
                         Button(
-                            onClick = onOpenBankSyncDialog,
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0x335EB893), contentColor = SageGreen),
+                            onClick = {
+                                if (!isSettingsUnlocked) {
+                                    isMasterPromptOpen = true
+                                } else {
+                                    onOpenBankSyncDialog()
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isSettingsUnlocked) Color(0x335EB893) else Color(0x22F2C2C2),
+                                contentColor = if (isSettingsUnlocked) SageGreen else BlushPink
+                            ),
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier.fillMaxWidth().height(48.dp)
                         ) {
-                            Icon(imageVector = Icons.Default.MarkEmailRead, contentDescription = "Scan", modifier = Modifier.size(18.dp))
+                            Icon(
+                                imageVector = if (isSettingsUnlocked) Icons.Default.MarkEmailRead else Icons.Default.Lock,
+                                contentDescription = "Scan",
+                                modifier = Modifier.size(18.dp)
+                            )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(text = "📩 Scan & Sync Bank Email Receipts (Grab, BCA, Mandiri)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = if (isSettingsUnlocked) "Sync Gmail Receipts (category:purchases)" else "Password Protected: Unlock to Sync Bank Receipts",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }
@@ -3058,8 +4115,27 @@ fun SettingsHomebase(
 fun AddTransactionDropdownDialog(
     categories: List<String>,
     onDismiss: () -> Unit,
-    onAdd: (String, Long, String, Boolean) -> Unit
+    onAdd: (String, Long, String, String, Boolean) -> Unit
 ) {
+    val context = LocalContext.current
+    val calendar = remember { java.util.Calendar.getInstance() }
+    val todayFormatted = remember { java.text.SimpleDateFormat("dd MMM yyyy", java.util.Locale.US).format(calendar.time) }
+    var dateText by remember { mutableStateOf(todayFormatted) }
+
+    val datePickerDialog = remember {
+        android.app.DatePickerDialog(
+            context,
+            { _, year, month, dayOfMonth ->
+                calendar.set(year, month, dayOfMonth)
+                val sdf = java.text.SimpleDateFormat("dd MMM yyyy", java.util.Locale.US)
+                dateText = sdf.format(calendar.time)
+            },
+            calendar.get(java.util.Calendar.YEAR),
+            calendar.get(java.util.Calendar.MONTH),
+            calendar.get(java.util.Calendar.DAY_OF_MONTH)
+        )
+    }
+
     var isExpense by remember { mutableStateOf(true) }
     var selectedCategory by remember { mutableStateOf(if (categories.isNotEmpty()) categories[0] else "Essential Needs") }
     var merchantText by remember { mutableStateOf("") }
@@ -3171,6 +4247,29 @@ fun AddTransactionDropdownDialog(
                 }
 
                 Column {
+                    Text("Transaction Date", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    OutlinedTextField(
+                        value = dateText,
+                        onValueChange = { dateText = it },
+                        readOnly = true,
+                        trailingIcon = {
+                            IconButton(onClick = { datePickerDialog.show() }) {
+                                Icon(imageVector = Icons.Default.CalendarToday, contentDescription = "Select Date", tint = SageGreen, modifier = Modifier.size(18.dp))
+                            }
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = SageGreen,
+                            unfocusedBorderColor = Color.Gray,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { datePickerDialog.show() }
+                    )
+                }
+
+                Column {
                     Text("Amount (Rp)", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                     OutlinedTextField(
                         value = amountText,
@@ -3195,7 +4294,7 @@ fun AddTransactionDropdownDialog(
                     val catLabel = if (isExpense) selectedCategory.split(" (")[0] else "Extra Income"
 
                     if (merchantText.isNotBlank() && amount > 0) {
-                        onAdd(merchantText, amount, catLabel, isExpense)
+                        onAdd(merchantText, amount, catLabel, dateText, isExpense)
                     }
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = SageGreen, contentColor = Color(0xFF0A0C0F)),
@@ -3274,122 +4373,15 @@ data class ParsedBankReceipt(
     val isExpense: Boolean = true
 )
 
-// Smart Auto-Parser Engine for Mandiri Livin', BCA, Grab E-Receipt, GoPay, QRIS
+// Smart Auto-Parser Engine (Delegated to Standalone Backend EmailReceiptParser Class)
 fun parseBankReceiptText(rawText: String): ParsedBankReceipt {
-    var merchant = ""
-
-    // 1. Grab E-Receipt Parser
-    if (rawText.contains("Grab", ignoreCase = true) || rawText.contains("GrabFood", ignoreCase = true)) {
-        val grabMerchantMatch = Regex("""(?:Pesanan Dari|Merchant|Restoran|Diterbitkan oleh Pengemudi)\s*[\n\r:]*\s*([^\n\r]+)""", RegexOption.IGNORE_CASE).find(rawText)
-        val grabStoreMatch = Regex("""([A-Za-z0-9\s\-]+(?:Coffee|Resto|Kopi|Food|Daan Mogot|Jakarta|Bekasi))""", RegexOption.IGNORE_CASE).find(rawText)
-        if (grabStoreMatch != null && grabStoreMatch.groupValues.size > 1) {
-            merchant = grabStoreMatch.groupValues[1].trim()
-        } else if (grabMerchantMatch != null && grabMerchantMatch.groupValues.size > 1) {
-            merchant = grabMerchantMatch.groupValues[1].trim()
-        } else {
-            merchant = "Fore Coffee - GrabFood"
-        }
-    }
-
-    // 2. BCA Journal Parser
-    if (merchant.isEmpty() && (rawText.contains("BCA", ignoreCase = true) || rawText.contains("myBCA", ignoreCase = true))) {
-        val bcaBeneficiaryMatch = Regex("""Beneficiary Name\s*[\n\r:]*\s*([^\n\r]+)""", RegexOption.IGNORE_CASE).find(rawText)
-        val bcaRemarksMatch = Regex("""Remarks\s*[\n\r:]*\s*([^\n\r]+)""", RegexOption.IGNORE_CASE).find(rawText)
-        val nameStr = bcaBeneficiaryMatch?.groupValues?.getOrNull(1)?.trim() ?: ""
-        val remarkStr = bcaRemarksMatch?.groupValues?.getOrNull(1)?.trim() ?: ""
-        
-        if (remarkStr.isNotEmpty()) {
-            merchant = "BCA - $remarkStr"
-        } else if (nameStr.isNotEmpty()) {
-            merchant = "Transfer to $nameStr"
-        } else {
-            merchant = "BCA Transfer"
-        }
-    }
-
-    // 3. Mandiri Livin' & Fallback QRIS Parser
-    if (merchant.isEmpty()) {
-        val merchantPatterns = listOf(
-            Regex("""Penerima\s*[\n\r:]*\s*([^\n\r]+)""", RegexOption.IGNORE_CASE),
-            Regex("""Merchant\s*[\n\r:]*\s*([^\n\r]+)""", RegexOption.IGNORE_CASE),
-            Regex("""Tujuan\s*[\n\r:]*\s*([^\n\r]+)""", RegexOption.IGNORE_CASE),
-            Regex("""Dibayarkan Kepada\s*[\n\r:]*\s*([^\n\r]+)""", RegexOption.IGNORE_CASE)
-        )
-        for (pattern in merchantPatterns) {
-            val match = pattern.find(rawText)
-            if (match != null && match.groupValues.size > 1) {
-                val candidate = match.groupValues[1].trim()
-                if (candidate.isNotEmpty() && !candidate.contains("Halo", ignoreCase = true)) {
-                    merchant = candidate
-                    break
-                }
-            }
-        }
-    }
-
-    if (merchant.isEmpty()) {
-        merchant = "CITRA LAUNDRY EXPRESS"
-    }
-
-    // 2. Amount Extraction (Rp 53488, Rp 50.400, IDR 105,000.00, etc.)
-    var amount: Long = 0L
-    val amountPatterns = listOf(
-        Regex("""TOTAL\s*[\n\r:]*\s*(?:Rp|IDR)?\s*([\d\.,]+)""", RegexOption.IGNORE_CASE),
-        Regex("""Amount\s*[\n\r:]*\s*(?:Rp|IDR)?\s*([\d\.,]+)""", RegexOption.IGNORE_CASE),
-        Regex("""Nominal Transaksi\s*[\n\r:]*\s*(?:Rp|IDR)?\s*([\d\.,]+)""", RegexOption.IGNORE_CASE),
-        Regex("""Total Transaksi\s*[\n\r:]*\s*(?:Rp|IDR)?\s*([\d\.,]+)""", RegexOption.IGNORE_CASE),
-        Regex("""(?:Rp|IDR)\s*([\d\.,]+)""", RegexOption.IGNORE_CASE)
-    )
-    for (pattern in amountPatterns) {
-        val match = pattern.find(rawText)
-        if (match != null && match.groupValues.size > 1) {
-            val rawAmtStr = match.groupValues[1]
-                .replace("Rp", "")
-                .replace("IDR", "")
-                .replace(".", "")
-                .split(",")[0]
-                .trim()
-            val parsedVal = rawAmtStr.toLongOrNull()
-            if (parsedVal != null && parsedVal > 0) {
-                amount = parsedVal
-                break
-            }
-        }
-    }
-    if (amount == 0L) amount = 53488L
-
-    // 3. Date Extraction
-    var dateStr = "2026-08-02"
-    val datePatterns = listOf(
-        Regex("""TANGGAL\s*\|\s*WAKTU\s*[\n\r:]*\s*([^\n\r]+)""", RegexOption.IGNORE_CASE),
-        Regex("""Transaction Date\s*[\n\r:]*\s*([^\n\r]+)""", RegexOption.IGNORE_CASE),
-        Regex("""Tanggal\s*[\n\r:]*\s*([^\n\r]+)""", RegexOption.IGNORE_CASE)
-    )
-    for (pattern in datePatterns) {
-        val match = pattern.find(rawText)
-        if (match != null && match.groupValues.size > 1) {
-            val extractedDate = match.groupValues[1].trim()
-            if (extractedDate.isNotEmpty()) {
-                dateStr = extractedDate
-                break
-            }
-        }
-    }
-
-    // 4. Smart Auto-Category Assignment
-    val category = when {
-        merchant.contains("Grab", ignoreCase = true) || merchant.contains("LAUNDRY", ignoreCase = true) || merchant.contains("SUPERMARKET", ignoreCase = true) || merchant.contains("INDOMARET", ignoreCase = true) || merchant.contains("ALFAMART", ignoreCase = true) -> "Kebutuhan Pokok"
-        merchant.contains("COFFEE", ignoreCase = true) || merchant.contains("RESTAURANT", ignoreCase = true) || merchant.contains("CAFE", ignoreCase = true) || merchant.contains("makan", ignoreCase = true) || merchant.contains("batmin", ignoreCase = true) -> "Self Reward & Hiburan"
-        merchant.contains("BENSIN", ignoreCase = true) || merchant.contains("PERTAMAX", ignoreCase = true) -> "Kebutuhan Pokok"
-        else -> "Kebutuhan Pokok"
-    }
-
+    val res = EmailReceiptParser.parse(rawText)
     return ParsedBankReceipt(
-        merchant = merchant,
-        amount = amount,
-        category = category,
-        transactionDate = dateStr,
-        isExpense = true
+        merchant = res.merchant,
+        amount = res.amount,
+        category = res.category,
+        transactionDate = res.transactionDate,
+        isExpense = res.isExpense
     )
 }
 
@@ -3399,36 +4391,7 @@ fun BankReceiptSyncDialog(
     onDismiss: () -> Unit,
     onImportReceipt: (ParsedBankReceipt) -> Unit
 ) {
-    val sampleGrabReceipt = """
-        Your Grab E-Receipt
-        Grab <no-reply@grab.com>
-        Selamat menikmati makanan Anda!
-        TOTAL: Rp 53488
-        TANGGAL | WAKTU: 01 Aug 26 09:24 +0700
-        Pesanan Dari: Fore Coffee - Daan Mogot
-        Detail Tagihan: 1x Iced Aren Latte Rp 31000, 1x Iced Pandan Latte Rp 38000
-    """.trimIndent()
-
-    val sampleBcaReceipt = """
-        Internet Transaction Journal
-        BCA <bca@bca.co.id>
-        Hello RICKY MARIO BUTAR BUTAR,
-        Status: Successful
-        Transaction Date: 23 Jul 2026 07:04:55
-        Beneficiary Name: ILHAM AGSAN RAMADHAN
-        Amount: IDR 105,000.00
-        Remarks: makan + batmin
-    """.trimIndent()
-
-    val sampleMandiriReceipt = """
-        Pembayaran Berhasil!
-        Livin' <noreply.livin@bankmandiri.co.id>
-        Penerima: CITRA LAUNDRY EXPRESS
-        Tanggal: 2 Agu 2026
-        Nominal Transaksi: Rp 50.400,00
-    """.trimIndent()
-
-    var rawReceiptText by remember { mutableStateOf(sampleGrabReceipt) }
+    var rawReceiptText by remember { mutableStateOf("") }
     var parsedReceipt by remember { mutableStateOf(parseBankReceiptText(rawReceiptText)) }
 
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
@@ -3450,7 +4413,7 @@ fun BankReceiptSyncDialog(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(imageVector = Icons.Default.MarkEmailRead, contentDescription = "Email Sync", tint = SageGreen, modifier = Modifier.size(22.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(text = "Bank & App Receipt Auto-Sync", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        Text(text = "Dynamic Email Receipt Parser", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                     }
                     IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
                         Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = Color.Gray)
@@ -3459,48 +4422,7 @@ fun BankReceiptSyncDialog(
 
                 HorizontalDivider(color = DarkCardBorder)
 
-                Text("Select Sample or Paste Receipt Text:", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Button(
-                        onClick = {
-                            rawReceiptText = sampleGrabReceipt
-                            parsedReceipt = parseBankReceiptText(sampleGrabReceipt)
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0x335EB893), contentColor = SageGreen),
-                        shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(text = "⚡ GrabFood", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                    }
-
-                    Button(
-                        onClick = {
-                            rawReceiptText = sampleBcaReceipt
-                            parsedReceipt = parseBankReceiptText(sampleBcaReceipt)
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0x333B82F6), contentColor = SoftBlue),
-                        shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(text = "⚡ BCA", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                    }
-
-                    Button(
-                        onClick = {
-                            rawReceiptText = sampleMandiriReceipt
-                            parsedReceipt = parseBankReceiptText(sampleMandiriReceipt)
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0x33F59E0B), contentColor = PastelGold),
-                        shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(text = "⚡ Mandiri", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
+                Text("Tempel Teks Struk Email Dari Inbox Anda (Mandiri, BCA, Google Play, Mamikos, dll):", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.Medium)
 
                 OutlinedTextField(
                     value = rawReceiptText,
@@ -3508,37 +4430,39 @@ fun BankReceiptSyncDialog(
                         rawReceiptText = it
                         parsedReceipt = parseBankReceiptText(it)
                     },
-                    label = { Text("Receipt Content / Email Text", color = Color.Gray, fontSize = 11.sp) },
-                    placeholder = { Text("Paste Grab, BCA, Mandiri receipt text...", color = Color.Gray) },
-                    maxLines = 4,
+                    label = { Text("Teks Struk Email / Receipt Text", color = Color.Gray, fontSize = 11.sp) },
+                    placeholder = { Text("Tempel teks email dari rickymario62@gmail.com di sini...", color = Color.Gray) },
+                    maxLines = 6,
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = SageGreen, unfocusedBorderColor = Color.Gray, focusedTextColor = Color.White, unfocusedTextColor = Color.White),
-                    modifier = Modifier.fillMaxWidth().height(100.dp)
+                    modifier = Modifier.fillMaxWidth().height(120.dp)
                 )
 
                 // Extracted Card Preview
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = Color(0xFF13171E),
-                    shape = RoundedCornerShape(16.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x335EB893))
-                ) {
-                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(text = "🔍 Auto-Parsed Transaction Details:", color = SageGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(text = "Merchant / Toko:", color = Color.Gray, fontSize = 11.sp)
-                            Text(text = parsedReceipt.merchant, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(text = "Nominal:", color = Color.Gray, fontSize = 11.sp)
-                            Text(text = "- ${formatRupiah(parsedReceipt.amount)}", color = BlushPink, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
-                        }
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(text = "Kategori:", color = Color.Gray, fontSize = 11.sp)
-                            Text(text = parsedReceipt.category, color = SageGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(text = "Tanggal:", color = Color.Gray, fontSize = 11.sp)
-                            Text(text = parsedReceipt.transactionDate, color = Color.White, fontSize = 11.sp)
+                if (parsedReceipt.merchant.isNotBlank()) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = Color(0xFF13171E),
+                        shape = RoundedCornerShape(16.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x335EB893))
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(text = "🔍 Result Auto-Parsing Engine:", color = SageGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(text = "Merchant / Toko:", color = Color.Gray, fontSize = 11.sp)
+                                Text(text = parsedReceipt.merchant, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(text = "Nominal:", color = Color.Gray, fontSize = 11.sp)
+                                Text(text = "- ${formatRupiah(parsedReceipt.amount)}", color = BlushPink, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                            }
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(text = "Kategori:", color = Color.Gray, fontSize = 11.sp)
+                                Text(text = "Purchases", color = SageGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(text = "Tanggal:", color = Color.Gray, fontSize = 11.sp)
+                                Text(text = parsedReceipt.transactionDate, color = Color.White, fontSize = 11.sp)
+                            }
                         }
                     }
                 }
@@ -3549,17 +4473,18 @@ fun BankReceiptSyncDialog(
                         modifier = Modifier.weight(1f).height(44.dp),
                         shape = RoundedCornerShape(12.dp)
                     ) {
-                        Text("Cancel", color = Color.Gray)
+                        Text("Batal", color = Color.Gray)
                     }
                     Button(
                         onClick = { onImportReceipt(parsedReceipt) },
+                        enabled = parsedReceipt.merchant.isNotBlank(),
                         modifier = Modifier.weight(1f).height(44.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = SageGreen, contentColor = Color(0xFF0A0C0F)),
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Icon(imageVector = Icons.Default.Check, contentDescription = "Import", modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Import & Save", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Text("Simpan Ke Purchases", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                     }
                 }
             }
