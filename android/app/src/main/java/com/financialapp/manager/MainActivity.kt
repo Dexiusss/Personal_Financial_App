@@ -32,6 +32,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,6 +43,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -67,12 +69,13 @@ import kotlin.math.sin
 
 // Data Models
 data class TransactionModel(
-    val id: String,
+    var id: String,
     var merchant: String,
     var amount: Long,
-    var category: String,
+    var category: String    ,
     var date: String,
-    var isExpense: Boolean = true
+    var isExpense: Boolean = true,
+    var orderIndex: Int = 0
 )
 
 // Reactive AllocationCategoryModel
@@ -108,9 +111,9 @@ data class WishlistMilestoneModel(
 
 // --- Cloud Integration Configuration ---
 object AppConfig {
-    const val SUPABASE_URL = ""
-    const val SUPABASE_ANON_KEY = ""
-    const val GOOGLE_CLIENT_ID = ""
+    const val SUPABASE_URL = "https://lhljhwoupybvcsqgdejs.supabase.co"
+    const val SUPABASE_ANON_KEY = "sb_publishable_XDFEGRz8Dw-T0s2HT2knew_RdvEOdg4"
+    const val GOOGLE_CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID_PLACEHOLDER"
 }
 
 // --- Design System Color Palette ---
@@ -246,7 +249,7 @@ fun KeuanganKuMainScreen() {
     var selectedTab by remember { mutableIntStateOf(0) }
     var isAddDialogOpen by remember { mutableStateOf(false) }
     var isBankReceiptDialogOpen by remember { mutableStateOf(false) }
-    var isLoadingFromDatabase by remember { mutableStateOf(true) }
+    var isLoadingFromDatabase by remember { mutableStateOf(false) }
 
     // Master Security Password State (Persisted in Android SharedPreferences)
     val sharedPrefs = remember { context.getSharedPreferences("keuanganku_security_prefs", android.content.Context.MODE_PRIVATE) }
@@ -260,19 +263,21 @@ fun KeuanganKuMainScreen() {
     var isTestingDbConnection by remember { mutableStateOf(false) }
 
     // Auto-filled & Persisted Email API Credentials (Google Cloud Services - Gmail API)
-    val realClientId = AppConfig.GOOGLE_CLIENT_ID
+    val realClientId = "841913438987-nii2b9p15lo5hfpa0diom3g5veti5qd7.apps.googleusercontent.com"
     var isEmailServiceActive by remember { mutableStateOf(sharedPrefs.getBoolean("email_service_active", true)) }
     var rawEmailApiKey by remember { mutableStateOf(sharedPrefs.getString("email_api_key", realClientId) ?: realClientId) }
     
     // Automatically sanitize Client ID (strip https:// or http:// if accidentally pasted)
     val emailApiKey = remember(rawEmailApiKey) {
-        rawEmailApiKey.trim().replace("https://", "").replace("http://", "").trim('/')
+        val clean = rawEmailApiKey.trim().replace("https://", "").replace("http://", "").trim('/')
+        if (clean.isBlank() || clean.contains("0pjqc1e35")) realClientId else clean
     }
 
-    var recipientEmail by remember { mutableStateOf(sharedPrefs.getString("recipient_email", "") ?: "") }
+    var recipientEmail by remember { mutableStateOf(sharedPrefs.getString("recipient_email", "rickymario62@gmail.com") ?: "rickymario62@gmail.com") }
     var isEmailConnected by remember { mutableStateOf(true) }
     var isTestingEmailConnection by remember { mutableStateOf(false) }
     var isRefreshingEmail by remember { mutableStateOf(false) }
+    var isRefreshingDatabase by remember { mutableStateOf(false) }
     var isGoogleSignedIn by remember { mutableStateOf(sharedPrefs.getBoolean("google_signed_in", false)) }
     var triggerScanAfterLogin by remember { mutableStateOf(false) }
 
@@ -363,15 +368,148 @@ fun KeuanganKuMainScreen() {
         }
     }
 
+    fun formatToIsoDate(dateStr: String): String {
+        val trimmed = dateStr.trim()
+        if (trimmed.isBlank() || trimmed.equals("Today", ignoreCase = true)) {
+            return java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+        }
+        if (trimmed.matches(Regex("""^\d{4}-\d{2}-\d{2}$"""))) {
+            return trimmed
+        }
+        if (trimmed.matches(Regex("""^\d{4}-\d{2}-\d{2}.*"""))) {
+            return trimmed.take(10)
+        }
+        val formats = listOf(
+            java.text.SimpleDateFormat("dd MMM yyyy HH:mm:ss", java.util.Locale.US),
+            java.text.SimpleDateFormat("dd MMM yyyy", java.util.Locale.US),
+            java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.US),
+            java.text.SimpleDateFormat("dd MMMM yyyy", java.util.Locale.US),
+            java.text.SimpleDateFormat("d MMMM yyyy", java.util.Locale.US),
+            java.text.SimpleDateFormat("dd MMM yyyy", java.util.Locale("id", "ID")),
+            java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale("id", "ID")),
+            java.text.SimpleDateFormat("dd MMMM yyyy", java.util.Locale("id", "ID")),
+            java.text.SimpleDateFormat("d MMMM yyyy", java.util.Locale("id", "ID")),
+            java.text.SimpleDateFormat("yyyy/MM/dd", java.util.Locale.US),
+            java.text.SimpleDateFormat("dd/MM/yyyy", java.util.Locale.US)
+        )
+        for (fmt in formats) {
+            try {
+                val d = fmt.parse(trimmed)
+                if (d != null) {
+                    return java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(d)
+                }
+            } catch (_: Exception) {}
+        }
+        return java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+    }
+
+    fun saveTransactionsToCache(txs: List<TransactionModel>) {
+        try {
+            val arr = JSONArray()
+            txs.forEach { tx ->
+                val obj = JSONObject()
+                obj.put("id", tx.id)
+                obj.put("merchant", tx.merchant)
+                obj.put("amount", tx.amount)
+                obj.put("category", tx.category)
+                obj.put("date", tx.date)
+                obj.put("isExpense", tx.isExpense)
+                obj.put("orderIndex", tx.orderIndex)
+                arr.put(obj)
+            }
+            sharedPrefs.edit().putString("cached_transactions_json", arr.toString()).apply()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun loadTransactionsFromCache(): List<TransactionModel> {
+        val jsonStr = sharedPrefs.getString("cached_transactions_json", null) ?: return emptyList()
+        return try {
+            val list = mutableListOf<TransactionModel>()
+            val arr = JSONArray(jsonStr)
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                val id = obj.optString("id", System.currentTimeMillis().toString())
+                val merchant = obj.optString("merchant", "Transaction")
+                val amount = obj.optLong("amount", 0L)
+                val category = obj.optString("category", "Others")
+                val date = obj.optString("date", "Today")
+                val isExpense = obj.optBoolean("isExpense", true)
+                val orderIndex = obj.optInt("orderIndex", i)
+                list.add(TransactionModel(id, merchant, amount, category, date, isExpense, orderIndex))
+            }
+            list
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun saveWishlistsToCache(wishlists: List<WishlistMilestoneModel>) {
+        try {
+            val arr = JSONArray()
+            wishlists.forEach { w ->
+                val obj = JSONObject()
+                obj.put("id", w.id)
+                obj.put("title", w.title)
+                obj.put("targetAmount", w.targetAmount)
+                obj.put("currentSaved", w.currentSaved)
+                val hex = try {
+                    val r = (w.color.red * 255).toInt()
+                    val g = (w.color.green * 255).toInt()
+                    val b = (w.color.blue * 255).toInt()
+                    String.format("#%02X%02X%02X", r, g, b)
+                } catch (e: Exception) { "#5EB893" }
+                obj.put("color_hex", hex)
+                arr.put(obj)
+            }
+            sharedPrefs.edit().putString("cached_wishlists_json", arr.toString()).apply()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun loadWishlistsFromCache(): List<WishlistMilestoneModel> {
+        val jsonStr = sharedPrefs.getString("cached_wishlists_json", null) ?: return emptyList()
+        return try {
+            val list = mutableListOf<WishlistMilestoneModel>()
+            val arr = JSONArray(jsonStr)
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                val id = obj.optString("id", "w_${i+1}")
+                val title = obj.optString("title", "Wishlist Goal")
+                val target = obj.optLong("targetAmount", 10000000L)
+                val current = obj.optLong("currentSaved", 0L)
+                val colorHex = obj.optString("color_hex", "#5EB893")
+                val color = try { Color(android.graphics.Color.parseColor(colorHex)) } catch (e: Exception) { CategoryColorPalette[i % CategoryColorPalette.size] }
+                list.add(WishlistMilestoneModel(id, title, target, current, color))
+            }
+            list
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
     // Dynamic Active Data States
     val savedPrefsCats = remember { loadCategoriesFromPrefs() }
+    val savedPrefsTxs = remember { loadTransactionsFromCache() }
+    val savedPrefsWishlists = remember { loadWishlistsFromCache() }
+
     val categoriesList = remember { 
         mutableStateListOf<AllocationCategoryModel>().apply { 
             if (savedPrefsCats.isNotEmpty()) addAll(savedPrefsCats) 
         } 
     }
-    val transactionsList = remember { mutableStateListOf<TransactionModel>() }
-    val wishlistList = remember { mutableStateListOf<WishlistMilestoneModel>() }
+    val transactionsList = remember { 
+        mutableStateListOf<TransactionModel>().apply { 
+            if (savedPrefsTxs.isNotEmpty()) addAll(savedPrefsTxs) 
+        } 
+    }
+    val wishlistList = remember { 
+        mutableStateListOf<WishlistMilestoneModel>().apply { 
+            if (savedPrefsWishlists.isNotEmpty()) addAll(savedPrefsWishlists) 
+        } 
+    }
     val savedSavingsCatString = sharedPrefs.getString("selected_savings_cat_ids", "c2,c5") ?: "c2,c5"
     val initialSavingsIds = savedSavingsCatString.split(",").filter { it.isNotBlank() }
     val selectedSavingsCategoryIds = remember { mutableStateListOf<String>().apply { addAll(initialSavingsIds) } }
@@ -403,8 +541,11 @@ fun KeuanganKuMainScreen() {
                         val amount = obj.optLong("amount", 0L)
                         val category = obj.optString("category", "Others")
                         val date = obj.optString("transaction_date", "Today")
-                        val isExpense = obj.optBoolean("is_expense", true)
-                        parsedList.add(TransactionModel(id, merchant, amount, category, date, isExpense))
+                        val isExpense = if (obj.has("is_expense")) {
+                            val raw = obj.get("is_expense")
+                            if (raw is Boolean) raw else raw.toString().toBoolean()
+                        } else true
+                        parsedList.add(TransactionModel(id, merchant, amount, category, date, isExpense, orderIndex = i))
                     }
                     parsedList
                 } else emptyList()
@@ -685,41 +826,28 @@ fun KeuanganKuMainScreen() {
         }
     }
 
-    // Diagnostic Supabase DELETE Function
+    // Diagnostic Supabase DELETE Function (Exact UUID or Exact Merchant+Amount Matching)
     suspend fun syncDeleteTransactionSupabase(tx: TransactionModel): String {
         return withContext(Dispatchers.IO) {
             try {
-                var endpoint = "$supabaseUrl/rest/v1/transactions?id=eq.${tx.id}"
-                var url = URL(endpoint)
-                var conn = url.openConnection() as HttpURLConnection
+                val endpoint = if (tx.id.length >= 25 && tx.id.contains("-")) {
+                    "$supabaseUrl/rest/v1/transactions?id=eq.${tx.id}"
+                } else {
+                    val encodedMerchant = URLEncoder.encode(tx.merchant, "UTF-8").replace("+", "%20")
+                    "$supabaseUrl/rest/v1/transactions?merchant=eq.$encodedMerchant&amount=eq.${tx.amount}&is_expense=eq.${tx.isExpense}"
+                }
+                val url = URL(endpoint)
+                val conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "DELETE"
                 conn.setRequestProperty("apikey", supabaseKey)
                 conn.setRequestProperty("Authorization", "Bearer $supabaseKey")
                 conn.setRequestProperty("Prefer", "return=representation")
                 conn.connectTimeout = 5000
-                var code = conn.responseCode
-                
-                var resStr = if (code in 200..299) {
+                val code = conn.responseCode
+                val resStr = if (code in 200..299) {
                     conn.inputStream.bufferedReader().use { it.readText() }
                 } else {
                     conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                }
-
-                if (code in 200..299 && resStr == "[]") {
-                    val firstWord = tx.merchant.split(" ")[0]
-                    val encodedWord = URLEncoder.encode("%$firstWord%", "UTF-8").replace("+", "%20")
-                    endpoint = "$supabaseUrl/rest/v1/transactions?merchant=ilike.$encodedWord"
-                    url = URL(endpoint)
-                    conn = url.openConnection() as HttpURLConnection
-                    conn.requestMethod = "DELETE"
-                    conn.setRequestProperty("apikey", supabaseKey)
-                    conn.setRequestProperty("Authorization", "Bearer $supabaseKey")
-                    conn.setRequestProperty("Prefer", "return=representation")
-                    conn.connectTimeout = 5000
-                    code = conn.responseCode
-                    resStr = if (code in 200..299) {
-                        conn.inputStream.bufferedReader().use { it.readText() }
-                    } else ""
                 }
 
                 if (code in 200..299) {
@@ -740,9 +868,8 @@ fun KeuanganKuMainScreen() {
                 val urlStr = if (tx.id.length >= 25 && tx.id.contains("-")) {
                     "$supabaseUrl/rest/v1/transactions?id=eq.${tx.id}"
                 } else {
-                    val firstWord = tx.merchant.split(" ")[0]
-                    val encodedWord = URLEncoder.encode("%$firstWord%", "UTF-8").replace("+", "%20")
-                    "$supabaseUrl/rest/v1/transactions?merchant=ilike.$encodedWord"
+                    val encodedMerchant = URLEncoder.encode(tx.merchant, "UTF-8").replace("+", "%20")
+                    "$supabaseUrl/rest/v1/transactions?merchant=eq.$encodedMerchant&amount=eq.${tx.amount}&is_expense=eq.${tx.isExpense}"
                 }
                 val url = URL(urlStr)
                 val conn = url.openConnection() as HttpURLConnection
@@ -783,18 +910,42 @@ fun KeuanganKuMainScreen() {
                 conn.setRequestProperty("Content-Type", "application/json")
                 conn.setRequestProperty("Prefer", "return=representation")
                 conn.doOutput = true
+
+                val formattedDate = formatToIsoDate(tx.date)
                 
                 val jsonBody = """
                     {
                         "merchant": "${tx.merchant}",
                         "amount": ${tx.amount},
                         "category": "${tx.category}",
+                        "transaction_date": "$formattedDate",
                         "is_expense": ${tx.isExpense}
                     }
                 """.trimIndent()
 
                 conn.outputStream.write(jsonBody.toByteArray())
-                conn.responseCode in 200..299
+                val resCode = conn.responseCode
+                if (resCode in 200..299) {
+                    val resStr = conn.inputStream.bufferedReader().use { it.readText() }
+                    try {
+                        val jsonArr = JSONArray(resStr)
+                        if (jsonArr.length() > 0) {
+                            val insertedObj = jsonArr.getJSONObject(0)
+                            val insertedId = insertedObj.optString("id", "")
+                            if (insertedId.isNotBlank()) {
+                                tx.id = insertedId
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                    saveTransactionsToCache(transactionsList)
+                    true
+                } else {
+                    val errStr = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                    android.util.Log.e("SupabaseInsert", "Insert failed HTTP $resCode: $errStr")
+                    false
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
                 false
@@ -827,7 +978,8 @@ fun KeuanganKuMainScreen() {
         if (cleanKey.isBlank()) return false
         return withContext(Dispatchers.IO) {
             try {
-                cleanKey.isNotBlank() && cleanKey.contains("apps.googleusercontent.com")
+                // Verify Google OAuth Client ID structure for com.financialapp.manager
+                cleanKey.contains("841913438987") || cleanKey.contains("apps.googleusercontent.com")
             } catch (e: Exception) {
                 false
             }
@@ -850,13 +1002,11 @@ fun KeuanganKuMainScreen() {
                 if (textToParse.isNotBlank()) {
                     val parsed = EmailReceiptParser.parse(textToParse)
                     if (parsed.merchant.isNotBlank()) {
-                        transactionsList.removeAll { it.merchant.equals(parsed.merchant, ignoreCase = true) && it.amount == parsed.amount }
-                        
                         val freshTx = TransactionModel(
                             id = "email_${parsed.merchant.lowercase().replace(" ", "_")}_${parsed.amount}",
                             merchant = parsed.merchant,
                             amount = parsed.amount,
-                            category = "Purchases",
+                            category = "Essential Needs",
                             date = parsed.transactionDate,
                             isExpense = true
                         )
@@ -868,18 +1018,14 @@ fun KeuanganKuMainScreen() {
                     }
                 } else {
                     val account = GoogleSignIn.getLastSignedInAccount(context)
-                    val userGmail = (account?.email ?: recipientEmail).trim()
-                    if (userGmail.isBlank()) {
-                        Toast.makeText(context, "Please sign in with Google or set your recipient email in Settings.", Toast.LENGTH_LONG).show()
-                        return@launch
-                    }
+                    val userGmail = (account?.email ?: recipientEmail).ifBlank { "rickymario62@gmail.com" }
                     var parsedCount = 0
                     var skippedDuplicateCount = 0
-                    val maxParseTarget = if (maxEmailCount <= 1) 1 else 20
-                    val fetchLimit = 20
-
-                    // Clear any old SharedPreferences cache so manual DB deletions can be re-tested smoothly
-                    sharedPrefs.edit().remove("parsed_gmail_msg_ids").apply()
+                    var lastParsedMerchant = ""
+                    var lastParsedAmount = 0L
+                    var isNetworkError = false
+                    val maxParseTarget = if (maxEmailCount <= 1) 1 else 5
+                    val fetchLimit = if (maxEmailCount <= 1) 10 else 10
 
                     withContext(Dispatchers.IO) {
                         try {
@@ -897,124 +1043,130 @@ fun KeuanganKuMainScreen() {
                                 null
                             } catch (e: Exception) {
                                 e.printStackTrace()
-                                withContext(Dispatchers.Main) {
-                                    Toast.makeText(context, "OAuth Token Error (${userGmail}): ${e.localizedMessage}", Toast.LENGTH_LONG).show()
-                                }
+                                isNetworkError = true
                                 null
                             }
 
                             if (accessToken.isNullOrBlank()) {
+                                isNetworkError = true
                                 return@withContext
                             }
 
-                            if (!accessToken.isNullOrBlank()) {
-                                val encodedQuery = URLEncoder.encode("category:purchases", "UTF-8")
-                                val url = URL("https://gmail.googleapis.com/gmail/v1/users/me/messages?q=$encodedQuery&maxResults=$fetchLimit")
-                                val conn = url.openConnection() as HttpURLConnection
-                                conn.requestMethod = "GET"
-                                conn.setRequestProperty("Authorization", "Bearer $accessToken")
-                                conn.connectTimeout = 4000
-                                conn.readTimeout = 4000
+                            val queryStr = "BCA OR Mandiri OR BRI OR BNI OR GoPay OR ShopeePay OR Google OR Grab OR Mamikos OR Transfer OR Pembayaran OR Struk OR Rp OR IDR"
+                            val encodedQuery = URLEncoder.encode(queryStr, "UTF-8")
+                            val url = URL("https://gmail.googleapis.com/gmail/v1/users/me/messages?q=$encodedQuery&maxResults=$fetchLimit")
+                            val conn = url.openConnection() as HttpURLConnection
+                            conn.requestMethod = "GET"
+                            conn.setRequestProperty("Authorization", "Bearer $accessToken")
+                            conn.connectTimeout = 4000
+                            conn.readTimeout = 4000
 
-                                if (conn.responseCode == 200) {
-                                    val jsonStr = conn.inputStream.bufferedReader().readText()
-                                    val rootObj = JSONObject(jsonStr)
-                                    val messagesArray = rootObj.optJSONArray("messages")
+                            if (conn.responseCode == 200) {
+                                val jsonStr = conn.inputStream.bufferedReader().readText()
+                                val rootObj = JSONObject(jsonStr)
+                                val messagesArray = rootObj.optJSONArray("messages")
 
-                                    if (messagesArray != null) {
-                                        val limit = minOf(fetchLimit, messagesArray.length())
+                                if (messagesArray != null) {
+                                    val limit = minOf(fetchLimit, messagesArray.length())
 
-                                        for (i in 0 until limit) {
-                                            val msgId = messagesArray.getJSONObject(i).optString("id")
+                                    for (i in 0 until limit) {
+                                        val msgId = messagesArray.getJSONObject(i).optString("id")
 
-                                            // DEDUPLICATION CHECK 1: Skip ONLY if this message ID is CURRENTLY in transactionsList
-                                            val isMsgIdAlreadyParsed = withContext(Dispatchers.Main) {
-                                                transactionsList.any { it.id.contains(msgId) }
+                                        val isMsgIdAlreadyParsed = withContext(Dispatchers.Main) {
+                                            transactionsList.any { it.id.contains(msgId) }
+                                        }
+
+                                        val detailUrl = URL("https://gmail.googleapis.com/gmail/v1/users/me/messages/$msgId?format=full")
+                                        val detailConn = detailUrl.openConnection() as HttpURLConnection
+                                        detailConn.setRequestProperty("Authorization", "Bearer $accessToken")
+                                        detailConn.connectTimeout = 4000
+                                        detailConn.readTimeout = 4000
+
+                                        if (detailConn.responseCode == 200) {
+                                            val detailJson = detailConn.inputStream.bufferedReader().readText()
+                                            val fullText = extractFullEmailText(detailJson)
+                                            
+                                            val isPurchaseEmail = fullText.contains("Rp", ignoreCase = true) ||
+                                                    fullText.contains("IDR", ignoreCase = true) ||
+                                                    fullText.contains("Nominal", ignoreCase = true) ||
+                                                    fullText.contains("Penerima", ignoreCase = true) ||
+                                                    fullText.contains("Pembayaran", ignoreCase = true) ||
+                                                    fullText.contains("Top-up", ignoreCase = true) ||
+                                                    fullText.contains("Google", ignoreCase = true) ||
+                                                    fullText.contains("Mamikos", ignoreCase = true) ||
+                                                    fullText.contains("Grab", ignoreCase = true) ||
+                                                    fullText.contains("BCA", ignoreCase = true) ||
+                                                    fullText.contains("Mandiri", ignoreCase = true)
+
+                                            if (!isPurchaseEmail) {
+                                                continue
                                             }
+
                                             if (isMsgIdAlreadyParsed) {
                                                 skippedDuplicateCount++
-                                                continue // SKIP DUPLICATE IN ACTIVE LIST
+                                                if (maxEmailCount <= 1) break
+                                                continue
                                             }
 
-                                            val detailUrl = URL("https://gmail.googleapis.com/gmail/v1/users/me/messages/$msgId?format=full")
-                                            val detailConn = detailUrl.openConnection() as HttpURLConnection
-                                            detailConn.setRequestProperty("Authorization", "Bearer $accessToken")
-                                            detailConn.connectTimeout = 4000
-                                            detailConn.readTimeout = 4000
-
-                                            if (detailConn.responseCode == 200) {
-                                                val detailJson = detailConn.inputStream.bufferedReader().readText()
-                                                val fullText = extractFullEmailText(detailJson)
+                                            val parsed = EmailReceiptParser.parse(fullText)
+                                            if (parsed.merchant.isNotBlank() && parsed.amount > 0 && 
+                                                !parsed.merchant.equals("Struk Transaksi", ignoreCase = true) &&
+                                                !parsed.merchant.equals("Transaksi Pembelian", ignoreCase = true) &&
+                                                !parsed.merchant.equals("Merchant / App", ignoreCase = true)) {
                                                 
-                                                // Quick Check: Skip if email does not contain financial / purchase keywords
-                                                val isPurchaseEmail = fullText.contains("Rp", ignoreCase = true) ||
-                                                        fullText.contains("IDR", ignoreCase = true) ||
-                                                        fullText.contains("Nominal", ignoreCase = true) ||
-                                                        fullText.contains("Penerima", ignoreCase = true) ||
-                                                        fullText.contains("Pembayaran", ignoreCase = true) ||
-                                                        fullText.contains("Top-up", ignoreCase = true) ||
-                                                        fullText.contains("Google", ignoreCase = true) ||
-                                                        fullText.contains("Mamikos", ignoreCase = true) ||
-                                                        fullText.contains("Grab", ignoreCase = true)
-
-                                                if (!isPurchaseEmail) {
-                                                    continue // SKIP NON-PURCHASE EMAIL IMMEDIATELY
-                                                }
-
-                                                val parsed = EmailReceiptParser.parse(fullText)
-                                                if (parsed.merchant.isNotBlank() && parsed.amount > 0 && 
-                                                    !parsed.merchant.equals("Struk Transaksi", ignoreCase = true) &&
-                                                    !parsed.merchant.equals("Transaksi Pembelian", ignoreCase = true) &&
-                                                    !parsed.merchant.equals("Merchant / App", ignoreCase = true)) {
-                                                    
-                                                    // DEDUPLICATION CHECK 2: Skip ONLY if Amount + Merchant CURRENTLY exists in active transactionsList
-                                                    val cleanNewAlpha = parsed.merchant.filter { it.isLetterOrDigit() }.lowercase()
-                                                    val isContentAlreadyParsed = withContext(Dispatchers.Main) {
-                                                        transactionsList.any { tx ->
-                                                            val cleanExistAlpha = tx.merchant.filter { it.isLetterOrDigit() }.lowercase()
-                                                            val sameAmount = tx.amount == parsed.amount
-                                                            val sameMerchant = cleanExistAlpha == cleanNewAlpha ||
-                                                                    (cleanExistAlpha.length >= 4 && cleanNewAlpha.length >= 4 && (cleanExistAlpha.contains(cleanNewAlpha) || cleanNewAlpha.contains(cleanExistAlpha)))
-                                                            sameAmount && sameMerchant
-                                                        }
-                                                    }
-
-                                                    if (isContentAlreadyParsed) {
-                                                        skippedDuplicateCount++
-                                                        continue // SKIP DUPLICATE CONTENT IN ACTIVE LIST
-                                                    }
-
-                                                    val freshTx = TransactionModel(
-                                                        id = "gmail_${msgId}_${parsed.amount}",
-                                                        merchant = parsed.merchant,
-                                                        amount = parsed.amount,
-                                                        category = "Essential Needs",
-                                                        date = parsed.transactionDate,
-                                                        isExpense = true
-                                                    )
-                                                    withContext(Dispatchers.Main) {
-                                                        transactionsList.add(freshTx)
-                                                    }
-                                                    syncInsertTransactionSupabase(freshTx)
-                                                    parsedCount++
-
-                                                    // Break early if we reached maxParseTarget (e.g. 1 new receipt for Scan 1)
-                                                    if (parsedCount >= maxParseTarget) {
-                                                        break
+                                                val cleanNewAlpha = parsed.merchant.filter { it.isLetterOrDigit() }.lowercase()
+                                                val isContentAlreadyParsed = withContext(Dispatchers.Main) {
+                                                    transactionsList.any { tx ->
+                                                        val cleanExistAlpha = tx.merchant.filter { it.isLetterOrDigit() }.lowercase()
+                                                        val sameAmount = tx.amount == parsed.amount
+                                                        val sameMerchant = cleanExistAlpha == cleanNewAlpha ||
+                                                                (cleanExistAlpha.length >= 4 && cleanNewAlpha.length >= 4 && (cleanExistAlpha.contains(cleanNewAlpha) || cleanNewAlpha.contains(cleanExistAlpha)))
+                                                        sameAmount && sameMerchant && (tx.date == parsed.transactionDate || formatToIsoDate(tx.date) == formatToIsoDate(parsed.transactionDate))
                                                     }
                                                 }
+
+                                                if (isContentAlreadyParsed) {
+                                                    skippedDuplicateCount++
+                                                    if (maxEmailCount <= 1) break
+                                                    continue
+                                                }
+
+                                                val freshTx = TransactionModel(
+                                                    id = "gmail_${msgId}_${parsed.amount}",
+                                                    merchant = parsed.merchant,
+                                                    amount = parsed.amount,
+                                                    category = "Essential Needs",
+                                                    date = parsed.transactionDate,
+                                                    isExpense = true
+                                                )
+                                                withContext(Dispatchers.Main) {
+                                                    transactionsList.add(0, freshTx)
+                                                }
+                                                syncInsertTransactionSupabase(freshTx)
+                                                lastParsedMerchant = parsed.merchant
+                                                lastParsedAmount = parsed.amount
+                                                parsedCount++
+
+                                                if (parsedCount >= maxParseTarget) {
+                                                    break
+                                                }
+                                            } else {
+                                                if (maxEmailCount <= 1 && skippedDuplicateCount > 0) break
                                             }
                                         }
                                     }
                                 }
+                            } else {
+                                isNetworkError = true
                             }
                         } catch (e: Exception) {
                             e.printStackTrace()
+                            isNetworkError = true
                         }
                     }
 
                     withContext(Dispatchers.Main) {
-                        // Purge promo title artifacts
+                        // Purge promo title artifacts & save cache
                         transactionsList.removeAll { 
                             it.merchant.contains("Aktifkan", ignoreCase = true) ||
                             it.merchant.contains("Notifikasi", ignoreCase = true) ||
@@ -1024,34 +1176,25 @@ fun KeuanganKuMainScreen() {
                             it.merchant.contains("PDF", ignoreCase = true) ||
                             (it.amount <= 100L && !it.merchant.contains("Google", ignoreCase = true))
                         }
-
-                        // Automatic List Deduplication Purge
-                        val uniqueList = mutableListOf<TransactionModel>()
-                        for (tx in transactionsList) {
-                            val cleanTxMerchant = tx.merchant.filter { it.isLetterOrDigit() }.lowercase()
-                            val existsInUnique = uniqueList.any { u ->
-                                val cleanUMerchant = u.merchant.filter { it.isLetterOrDigit() }.lowercase()
-                                u.amount == tx.amount && (
-                                    cleanUMerchant == cleanTxMerchant ||
-                                    (cleanUMerchant.length >= 4 && cleanTxMerchant.length >= 4 && (cleanUMerchant.contains(cleanTxMerchant) || cleanTxMerchant.contains(cleanUMerchant)))
-                                )
-                            }
-                            if (!existsInUnique) {
-                                uniqueList.add(tx)
-                            }
-                        }
-                        if (uniqueList.size < transactionsList.size) {
-                            transactionsList.clear()
-                            transactionsList.addAll(uniqueList)
-                        }
+                        saveTransactionsToCache(transactionsList)
                     }
 
-                    if (parsedCount > 0) {
-                        Toast.makeText(context, "Successfully processed $parsedCount new receipt transactions from Gmail $userGmail.", Toast.LENGTH_LONG).show()
-                    } else if (skippedDuplicateCount > 0) {
-                        Toast.makeText(context, "Transaction emails were previously processed ($skippedDuplicateCount skipped).", Toast.LENGTH_LONG).show()
+                    if (isNetworkError && parsedCount == 0 && skippedDuplicateCount == 0) {
+                        Toast.makeText(context, "Failed to connect to email server.", Toast.LENGTH_SHORT).show()
+                    } else if (maxEmailCount <= 1) {
+                        if (parsedCount > 0) {
+                            Toast.makeText(context, "Successfully processed 1 new receipt transaction: $lastParsedMerchant (${formatRupiah(lastParsedAmount)}).", Toast.LENGTH_LONG).show()
+                        } else {
+                            Toast.makeText(context, "Transaction already processed", Toast.LENGTH_LONG).show()
+                        }
                     } else {
-                        Toast.makeText(context, "No new receipt transactions found in Gmail $userGmail.", Toast.LENGTH_LONG).show()
+                        if (parsedCount > 0) {
+                            Toast.makeText(context, "Successfully processed $parsedCount new receipt transactions.", Toast.LENGTH_LONG).show()
+                        } else if (skippedDuplicateCount > 0) {
+                            Toast.makeText(context, "Transaction already processed ($skippedDuplicateCount skipped).", Toast.LENGTH_LONG).show()
+                        } else {
+                            Toast.makeText(context, "No new receipt transactions found.", Toast.LENGTH_LONG).show()
+                        }
                     }
                 }
             } finally {
@@ -1119,36 +1262,69 @@ fun KeuanganKuMainScreen() {
         }
     }
 
-    // Dynamic Real Database & Email Network Initialization
+    // Dynamic Real Database & Email Network Initialization (Offline-First Design)
     LaunchedEffect(supabaseUrl, supabaseKey) {
-        isLoadingFromDatabase = true
-        isDatabaseConnected = pingRealSupabase(supabaseUrl, supabaseKey)
+        if (transactionsList.isEmpty()) {
+            isLoadingFromDatabase = true
+        }
+        val connected = pingRealSupabase(supabaseUrl, supabaseKey)
+        isDatabaseConnected = connected
         isEmailConnected = pingRealEmailApi(emailApiKey)
 
-        // 1. Fetch User Settings
-        val userSettingsData = fetchLiveSupabaseUserSettings()
-        userSettingsData?.let { (salary, payday, autoPay) ->
-            if (salary != null && salary > 0) {
-                baseSalary = salary
-                sharedPrefs.edit().putLong("base_salary", salary).apply()
+        if (connected) {
+            // 1. Fetch User Settings
+            val userSettingsData = fetchLiveSupabaseUserSettings()
+            userSettingsData?.let { (salary, payday, autoPay) ->
+                if (salary != null && salary > 0) {
+                    baseSalary = salary
+                    sharedPrefs.edit().putLong("base_salary", salary).apply()
+                }
+                if (payday != null && payday in 1..31) {
+                    paydayDate = payday
+                    sharedPrefs.edit().putInt("payday_date", payday).apply()
+                }
+                if (autoPay != null) {
+                    isAutoPaydayEnabled = autoPay
+                    sharedPrefs.edit().putBoolean("auto_payday_enabled", autoPay).apply()
+                }
             }
-            if (payday != null && payday in 1..31) {
-                paydayDate = payday
-                sharedPrefs.edit().putInt("payday_date", payday).apply()
+
+            // 2. Fetch Salary Allocations
+            val liveAllocations = fetchLiveSupabaseAllocations()
+            if (liveAllocations.isNotEmpty()) {
+                categoriesList.clear()
+                categoriesList.addAll(liveAllocations)
+                saveCategoriesToPrefs(liveAllocations)
             }
-            if (autoPay != null) {
-                isAutoPaydayEnabled = autoPay
-                sharedPrefs.edit().putBoolean("auto_payday_enabled", autoPay).apply()
+
+            // 3. Fetch Transactions (Only update cache if database returned valid data)
+            val liveSupabaseData = fetchLiveSupabaseTransactions()
+            if (liveSupabaseData.isNotEmpty()) {
+                transactionsList.clear()
+                transactionsList.addAll(liveSupabaseData)
+                saveTransactionsToCache(liveSupabaseData)
             }
+
+            // 4. Fetch Wishlists
+            val liveWishlistsData = fetchLiveSupabaseWishlists()
+            if (liveWishlistsData.isNotEmpty()) {
+                wishlistList.clear()
+                wishlistList.addAll(liveWishlistsData)
+                saveWishlistsToCache(liveWishlistsData)
+            }
+
+            // 5. Fetch Quick Actions
+            val liveQuickActions = fetchLiveSupabaseQuickActions()
+            if (liveQuickActions.isNotEmpty()) {
+                quickActionsList.clear()
+                quickActionsList.addAll(liveQuickActions)
+            }
+        } else {
+            Toast.makeText(context, "Failed to connect to database", Toast.LENGTH_SHORT).show()
         }
 
-        // 2. Fetch Salary Allocations
-        val liveAllocations = fetchLiveSupabaseAllocations()
-        if (liveAllocations.isNotEmpty()) {
-            categoriesList.clear()
-            categoriesList.addAll(liveAllocations)
-            saveCategoriesToPrefs(liveAllocations)
-        } else if (categoriesList.isEmpty()) {
+        // Fallback for default categories if empty
+        if (categoriesList.isEmpty()) {
             val defaultCats = listOf(
                 AllocationCategoryModel("c1", "Essential Needs", 40, SageGreen),
                 AllocationCategoryModel("c2", "Savings & Investments", 20, SoftBlue),
@@ -1160,19 +1336,8 @@ fun KeuanganKuMainScreen() {
             saveCategoriesToPrefs(defaultCats)
         }
 
-        // 3. Fetch Transactions (Honors empty Supabase database cleanly without dummy data)
-        val liveSupabaseData = fetchLiveSupabaseTransactions()
-        transactionsList.clear()
-        if (liveSupabaseData.isNotEmpty()) {
-            transactionsList.addAll(liveSupabaseData)
-        }
-
-        // 4. Fetch Wishlists
-        val liveWishlistsData = fetchLiveSupabaseWishlists()
-        wishlistList.clear()
-        if (liveWishlistsData.isNotEmpty()) {
-            wishlistList.addAll(liveWishlistsData)
-        } else {
+        // Fallback for default wishlists if empty
+        if (wishlistList.isEmpty()) {
             val initialWishlists = listOf(
                 WishlistMilestoneModel("w1", "MacBook Pro M3", 25000000L, 16500000L, SageGreen),
                 WishlistMilestoneModel("w2", "Japan Trip 2027", 35000000L, 12000000L, SoftBlue),
@@ -1180,17 +1345,11 @@ fun KeuanganKuMainScreen() {
                 WishlistMilestoneModel("w4", "iPhone 16 Pro Max", 22000000L, 8500000L, LavenderPurple)
             )
             wishlistList.addAll(initialWishlists)
-            coroutineScope.launch {
-                initialWishlists.forEach { syncInsertWishlistSupabase(it) }
-            }
+            saveWishlistsToCache(initialWishlists)
         }
 
-        // 5. Fetch Quick Actions
-        val liveQuickActions = fetchLiveSupabaseQuickActions()
-        if (liveQuickActions.isNotEmpty()) {
-            quickActionsList.clear()
-            quickActionsList.addAll(liveQuickActions)
-        } else if (quickActionsList.isEmpty()) {
+        // Fallback for default quick actions if empty
+        if (quickActionsList.isEmpty()) {
             quickActionsList.addAll(
                 listOf(
                     QuickActionModel("q1", "Coffee", 18000L, "Self Reward & Entertainment", BlushPink),
@@ -1206,8 +1365,51 @@ fun KeuanganKuMainScreen() {
         isLoadingFromDatabase = false
     }
 
-    val totalExtraIncome = transactionsList.filter { !it.isExpense }.sumOf { it.amount }
+    val totalExtraIncome = transactionsList.filter { tx ->
+        !tx.isExpense && 
+        !tx.id.startsWith("dep_") && 
+        !tx.category.contains("Savings", ignoreCase = true) && 
+        !tx.category.contains("Tabungan", ignoreCase = true) && 
+        !tx.category.contains("Investment", ignoreCase = true)
+    }.sumOf { it.amount }
     val totalIncome = baseSalary + totalExtraIncome
+
+    fun refreshDataFromSupabase() {
+        coroutineScope.launch {
+            try {
+                isRefreshingDatabase = true
+                val connected = pingRealSupabase(supabaseUrl, supabaseKey)
+                if (!connected) {
+                    Toast.makeText(context, "Failed to connect to database", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                val liveSupabaseData = fetchLiveSupabaseTransactions()
+                if (liveSupabaseData.isNotEmpty()) {
+                    transactionsList.clear()
+                    transactionsList.addAll(liveSupabaseData)
+                    saveTransactionsToCache(liveSupabaseData)
+                }
+                val liveWishlistsData = fetchLiveSupabaseWishlists()
+                if (liveWishlistsData.isNotEmpty()) {
+                    wishlistList.clear()
+                    wishlistList.addAll(liveWishlistsData)
+                    saveWishlistsToCache(liveWishlistsData)
+                }
+                val liveAllocations = fetchLiveSupabaseAllocations()
+                if (liveAllocations.isNotEmpty()) {
+                    categoriesList.clear()
+                    categoriesList.addAll(liveAllocations)
+                    saveCategoriesToPrefs(liveAllocations)
+                }
+                Toast.makeText(context, "Data successfully updated from database", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Toast.makeText(context, "Failed to connect to database", Toast.LENGTH_SHORT).show()
+            } finally {
+                isRefreshingDatabase = false
+            }
+        }
+    }
 
     Scaffold(
         topBar = { TopNavbarHeader(onOpenAddDialog = { isAddDialogOpen = true }) },
@@ -1240,7 +1442,9 @@ fun KeuanganKuMainScreen() {
                             categories = categoriesList,
                             transactions = transactionsList,
                             isRefreshingEmail = isRefreshingEmail,
-                            onRefreshEmail = { count -> performEmailReceiptScan("", count) }
+                            onRefreshEmail = { count -> performEmailReceiptScan("", count) },
+                            isRefreshingDatabase = isRefreshingDatabase,
+                            onRefreshDatabase = { refreshDataFromSupabase() }
                         )
                         1 -> WalletsHomebase(
                             baseSalary = baseSalary,
@@ -1255,14 +1459,18 @@ fun KeuanganKuMainScreen() {
                                 if (idx != -1) {
                                     transactionsList[idx] = tx
                                 }
+                                saveTransactionsToCache(transactionsList)
                                 coroutineScope.launch { syncUpdateTransactionSupabase(tx) }
                                 Toast.makeText(context, "Transaction '${tx.merchant}' updated successfully.", Toast.LENGTH_SHORT).show()
                             },
                             onDeleteTransaction = { tx: TransactionModel ->
                                 transactionsList.remove(tx)
+                                saveTransactionsToCache(transactionsList)
                                 coroutineScope.launch { syncDeleteTransactionSupabase(tx) }
                                 Toast.makeText(context, "Transaction '${tx.merchant}' deleted successfully.", Toast.LENGTH_SHORT).show()
-                            }
+                            },
+                            isRefreshingDatabase = isRefreshingDatabase,
+                            onRefreshDatabase = { refreshDataFromSupabase() }
                         )
                         2 -> SavingsHomebase(
                             baseSalary = baseSalary,
@@ -1300,8 +1508,10 @@ fun KeuanganKuMainScreen() {
                             transactions = transactionsList,
                             onDepositSavings = { note: String, amount: Long, category: String ->
                                 val newTx = TransactionModel("dep_${System.currentTimeMillis()}", note, amount, category, "Today", isExpense = false)
-                                transactionsList.add(newTx)
+                                transactionsList.add(0, newTx)
+                                saveTransactionsToCache(transactionsList)
                                 coroutineScope.launch { syncInsertTransactionSupabase(newTx) }
+                                Toast.makeText(context, "Successfully deposited ${formatRupiah(amount)} into $category.", Toast.LENGTH_SHORT).show()
                             }
                         )
                         3 -> SalaryAllocationHomebase(
@@ -1384,20 +1594,12 @@ fun KeuanganKuMainScreen() {
                                 sharedPrefs.edit().putBoolean("email_service_active", it).apply()
                             },
                             emailApiKey = emailApiKey,
-                            onEmailApiKeyChange = { newKey ->
-                                rawEmailApiKey = newKey
-                                sharedPrefs.edit().putString("email_api_key", newKey).apply()
-                            },
                             recipientEmail = recipientEmail,
-                            onRecipientEmailChange = { newEmail ->
-                                recipientEmail = newEmail
-                                sharedPrefs.edit().putString("recipient_email", newEmail).apply()
-                            },
                             isEmailConnected = isEmailConnected,
                             isTestingEmailConnection = isTestingEmailConnection,
                             onTestSendEmail = {
                                 if (!isEmailServiceActive) {
-                                    Toast.makeText(context, "Layanan email nonaktif. Aktifkan sakelar terlebih dahulu.", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(context, "Email service is inactive. Turn on the switch in Settings.", Toast.LENGTH_LONG).show()
                                 } else {
                                     launchGoogleSignIn()
                                 }
@@ -1418,10 +1620,11 @@ fun KeuanganKuMainScreen() {
                     val txDate = date.ifBlank { "Today" }
                     val newTx = TransactionModel(System.currentTimeMillis().toString(), merchant, amount, category, txDate, isExpense = isExpense)
                     transactionsList.add(0, newTx)
+                    saveTransactionsToCache(transactionsList)
                     coroutineScope.launch { syncInsertTransactionSupabase(newTx) }
                     isAddDialogOpen = false
                     val typeText = if (isExpense) "Expense" else "Extra Income"
-                    Toast.makeText(context, "Successfully added $typeText for $txDate & saved to Database!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Successfully added $typeText for $txDate & saved to database!", Toast.LENGTH_SHORT).show()
                 }
             )
         }
@@ -1440,10 +1643,11 @@ fun KeuanganKuMainScreen() {
                         isExpense = parsed.isExpense
                     )
                     transactionsList.removeAll { it.merchant.equals(parsed.merchant, ignoreCase = true) && it.amount == parsed.amount }
-                    transactionsList.add(newTx)
+                    transactionsList.add(0, newTx)
+                    saveTransactionsToCache(transactionsList)
                     coroutineScope.launch { syncInsertTransactionSupabase(newTx) }
                     isBankReceiptDialogOpen = false
-                    Toast.makeText(context, "✅ Struk Gmail Berhasil Di-parse! ${parsed.merchant} (${formatRupiah(parsed.amount)}) Masuk Ke Purchases & Supabase! 📩", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Gmail receipt processed successfully! ${parsed.merchant} (${formatRupiah(parsed.amount)}) saved.", Toast.LENGTH_LONG).show()
                 }
             )
         }
@@ -1566,6 +1770,26 @@ fun getPaydayCycleMonth(dateStr: String, paydayDate: Int = 25): String {
     return String.format(Locale.US, "%04d-%02d", y, m)
 }
 
+fun parseTxDateToMillis(tx: TransactionModel): Long {
+    val dateStr = tx.date
+    if (dateStr.isBlank() || dateStr.equals("Today", ignoreCase = true)) {
+        return System.currentTimeMillis() + tx.orderIndex
+    }
+    val formats = listOf(
+        java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US),
+        java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US),
+        java.text.SimpleDateFormat("dd MMM yyyy HH:mm:ss", java.util.Locale.US),
+        java.text.SimpleDateFormat("dd MMM yyyy", java.util.Locale.US)
+    )
+    for (fmt in formats) {
+        try {
+            val d = fmt.parse(dateStr)
+            if (d != null) return d.time + (tx.orderIndex * 1000L)
+        } catch (_: Exception) {}
+    }
+    return System.currentTimeMillis() + tx.orderIndex
+}
+
 fun formatYearMonthDisplay(yearMonth: String): String {
     val parts = yearMonth.split("-")
     if (parts.size != 2) return yearMonth
@@ -1664,7 +1888,13 @@ fun calculateAllMonthlyBalances(
     for (ym in availableMonthsAsc) {
         val monthTxs = transactions.filter { getPaydayCycleMonth(it.date, paydayDate) == ym }
         val expenses = monthTxs.filter { it.isExpense }.sumOf { it.amount }
-        val extraInc = monthTxs.filter { !it.isExpense }.sumOf { it.amount }
+        val extraInc = monthTxs.filter { tx ->
+            !tx.isExpense && 
+            !tx.id.startsWith("dep_") && 
+            !tx.category.contains("Savings", ignoreCase = true) && 
+            !tx.category.contains("Tabungan", ignoreCase = true) && 
+            !tx.category.contains("Investment", ignoreCase = true)
+        }.sumOf { it.amount }
 
         val salary = calculateBaseSalaryForMonth(
             yearMonth = ym,
@@ -1773,16 +2003,19 @@ fun SleekMonthSelectorBar(
 }
 
 // 2. Homebase 0: Economic Overview
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EconomicOverviewHomebase(
     totalIncome: Long,
     categories: List<AllocationCategoryModel>,
     transactions: List<TransactionModel>,
     isRefreshingEmail: Boolean,
-    onRefreshEmail: (Int) -> Unit
+    onRefreshEmail: (Int) -> Unit,
+    isRefreshingDatabase: Boolean = false,
+    onRefreshDatabase: () -> Unit = {}
 ) {
-    var isConfirmScan20DialogOpen by remember { mutableStateOf(false) }
-    var isOverviewAscending by remember { mutableStateOf(true) }
+    var isConfirmScan5DialogOpen by remember { mutableStateOf(false) }
+    var isOverviewAscending by remember { mutableStateOf(false) }
 
     val expenseTransactions = transactions.filter { it.isExpense }
     val overallExpenses = expenseTransactions.sumOf { it.amount }
@@ -1799,307 +2032,336 @@ fun EconomicOverviewHomebase(
         cat to spent
     }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = 100.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp)
-    ) {
-        // Thick Modern Donut Chart Ring with Ambient Radial Glow Effect
-        item {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(270.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                // Radial Gradient Ambient Glow Aura Behind Donut Chart
-                Box(
-                    modifier = Modifier
-                        .size(240.dp)
-                        .background(
-                            brush = Brush.radialGradient(
-                                colors = listOf(
-                                    SageGreen.copy(alpha = 0.32f),
-                                    SoftBlue.copy(alpha = 0.20f),
-                                    PastelGold.copy(alpha = 0.08f),
-                                    Color.Transparent
-                                )
-                            ),
-                            shape = CircleShape
-                        )
-                )
-
-                Canvas(modifier = Modifier.size(210.dp)) {
-                    val strokeWidth = 58f
-                    // Base ring background
-                    drawCircle(color = Color(0xFF16191E), style = Stroke(width = strokeWidth))
-                    
-                    if (overallExpenses > 0) {
-                        var currentStartAngle = -90f
-                        categoryExpenses.forEach { (cat, spent) ->
-                            if (spent > 0) {
-                                val sweepAngle = (spent.toFloat() / overallExpenses.toFloat()) * 360f
-                                drawArc(
-                                    color = cat.color,
-                                    startAngle = currentStartAngle,
-                                    sweepAngle = sweepAngle,
-                                    useCenter = false,
-                                    style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-                                )
-                                currentStartAngle += sweepAngle
-                            }
-                        }
-                    }
-                }
-
-                // Center Ring Text: Remaining Budget Available (Total Income - Total Expenses)
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(text = "REMAINING BUDGET", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(text = formatRupiah(overallRemainingBudget), color = PastelGold, fontSize = 24.sp, fontWeight = FontWeight.Black)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(text = "Spent: ", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.Medium)
-                        Text(text = formatRupiah(overallExpenses), color = Color(0xFFEF5350), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
+    val pullToRefreshState = rememberPullToRefreshState()
+    if (pullToRefreshState.isRefreshing) {
+        LaunchedEffect(true) {
+            onRefreshDatabase()
         }
-
-        // Category Legend Items without bounding box
-        item {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                val categoryChunks = activeCategories.chunked(3)
-
-                categoryChunks.forEach { rowChunk ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = if (rowChunk.size < 3) Arrangement.Center else Arrangement.SpaceBetween
-                    ) {
-                        rowChunk.forEach { cat ->
-                            val spent = expenseTransactions.filter { tx ->
-                                val matchedCat = matchCategoryForTransaction(tx.category, categories)
-                                matchedCat?.id == cat.id
-                            }.sumOf { it.amount }
-                            val usagePct = if (overallExpenses > 0) ((spent.toDouble() / overallExpenses.toDouble()) * 100).toInt() else 0
-
-                            SleekLegendBarItem(
-                                label = cat.name.split(" ")[0],
-                                usagePercentText = "$usagePct%",
-                                usageFraction = (usagePct / 100f).coerceIn(0f, 1f),
-                                color = cat.color
-                            )
-
-                            if (rowChunk.size < 3) {
-                                Spacer(modifier = Modifier.width(16.dp))
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Email Sync Bar: 2 Side-by-Side Cards (Left: Scan 20 [Dark], Right: Scan [Full Neon Green])
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(20.dp)
-            ) {
-                // LEFT CARD: Scan 20 (Secondary Action - Dark Background)
-                Surface(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(20.dp))
-                        .clickable(enabled = !isRefreshingEmail) { isConfirmScan20DialogOpen = true },
-                    color = DarkCard,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0x225EB893)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (isRefreshingEmail) {
-                                CircularProgressIndicator(color = SageGreen, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                            } else {
-                                Icon(imageVector = Icons.Default.MarkEmailRead, contentDescription = "Scan 20 Emails", tint = SageGreen, modifier = Modifier.size(18.dp))
-                            }
-                        }
-                        Column {
-                            Text(text = "Bulk Scan", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                            Text(text = "Scan 20 Email", color = Color.Gray, fontSize = 10.sp)
-                        }
-                    }
-                }
-
-                // RIGHT CARD: Scan 1 (Primary Action - Full Neon Sage Green Background)
-                Surface(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(20.dp))
-                        .clickable(enabled = !isRefreshingEmail) { onRefreshEmail(1) },
-                    color = SageGreen,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, SageGreen)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFF0A0C0F).copy(alpha = 0.15f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (isRefreshingEmail) {
-                                CircularProgressIndicator(color = Color(0xFF0A0C0F), modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                            } else {
-                                Icon(imageVector = Icons.Default.Refresh, contentDescription = "Scan 1 Email", tint = Color(0xFF0A0C0F), modifier = Modifier.size(18.dp))
-                            }
-                        }
-                        Column {
-                            Text(text = "Scan", color = Color(0xFF0A0C0F), fontSize = 15.sp, fontWeight = FontWeight.Black)
-                            Text(text = "Scan Email", color = Color(0xFF0A0C0F).copy(alpha = 0.7f), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-        }
-
-
-        // "Last Transaction & Input" Section matching Reference UI
-        item {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(text = "Last Transaction & Input", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                Surface(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable { isOverviewAscending = !isOverviewAscending },
-                    color = Color(0xFF1C2026),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x445EB893))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = if (isOverviewAscending) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
-                            contentDescription = "Sort Order",
-                            tint = SageGreen,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = if (isOverviewAscending) "Ascending" else "Descending",
-                            color = SageGreen,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-
-            if (transactions.isEmpty()) {
-                Text("No recent transactions.", color = Color.Gray, fontSize = 12.sp)
-            } else {
-                val displayOverviewList = if (isOverviewAscending) transactions else transactions.reversed()
-                displayOverviewList.take(6).forEach { tx ->
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            color = DarkCard,
-                            shape = RoundedCornerShape(18.dp),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(38.dp)
-                                            .clip(CircleShape)
-                                            .background(if (tx.isExpense) Color(0x22F2C2C2) else Color(0x225EB893)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = if (tx.isExpense) Icons.Default.ArrowDownward else Icons.Default.ArrowUpward,
-                                            contentDescription = "TxType",
-                                            tint = if (tx.isExpense) BlushPink else SageGreen,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = tx.merchant,
-                                            color = Color.White,
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            maxLines = 1,
-                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                                        )
-                                        Text(
-                                            text = "${tx.category} • ${tx.date}",
-                                            color = Color.Gray,
-                                            fontSize = 10.sp,
-                                            maxLines = 1,
-                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                                        )
-                                    }
-                                }
-
-                                Spacer(modifier = Modifier.width(8.dp))
-
-                                Text(
-                                    text = if (tx.isExpense) "- ${formatRupiah(tx.amount)}" else "+ ${formatRupiah(tx.amount)}",
-                                    color = if (tx.isExpense) BlushPink else SageGreen,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    maxLines = 1
-                                )
-                            }
-                        }
-                    }
-                }
-            }
+    }
+    LaunchedEffect(isRefreshingDatabase) {
+        if (!isRefreshingDatabase) {
+            pullToRefreshState.endRefresh()
         }
     }
 
-    // Confirmation Dialog for Scan 20 Emails
-    if (isConfirmScan20DialogOpen) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .nestedScroll(pullToRefreshState.nestedScrollConnection)
+    ) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 100.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            // Thick Modern Donut Chart Ring with Ambient Radial Glow Effect
+            item {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(270.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    // Radial Gradient Ambient Glow Aura Behind Donut Chart
+                    Box(
+                        modifier = Modifier
+                            .size(240.dp)
+                            .background(
+                                brush = Brush.radialGradient(
+                                    colors = listOf(
+                                        SageGreen.copy(alpha = 0.32f),
+                                        SoftBlue.copy(alpha = 0.20f),
+                                        PastelGold.copy(alpha = 0.08f),
+                                        Color.Transparent
+                                    )
+                                ),
+                                shape = CircleShape
+                            )
+                    )
+
+                    Canvas(modifier = Modifier.size(210.dp)) {
+                        val strokeWidth = 58f
+                        // Base ring background
+                        drawCircle(color = Color(0xFF16191E), style = Stroke(width = strokeWidth))
+                        
+                        if (overallExpenses > 0) {
+                            var currentStartAngle = -90f
+                            categoryExpenses.forEach { (cat, spent) ->
+                                if (spent > 0) {
+                                    val sweepAngle = (spent.toFloat() / overallExpenses.toFloat()) * 360f
+                                    drawArc(
+                                        color = cat.color,
+                                        startAngle = currentStartAngle,
+                                        sweepAngle = sweepAngle,
+                                        useCenter = false,
+                                        style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+                                    )
+                                    currentStartAngle += sweepAngle
+                                }
+                            }
+                        }
+                    }
+
+                    // Center Ring Text: Remaining Budget Available (Total Income - Total Expenses)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(text = "REMAINING BUDGET", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(text = formatRupiah(overallRemainingBudget), color = PastelGold, fontSize = 24.sp, fontWeight = FontWeight.Black)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(text = "Spent: ", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                            Text(text = formatRupiah(overallExpenses), color = Color(0xFFEF5350), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            // Category Legend Items without bounding box
+            item {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    val categoryChunks = activeCategories.chunked(3)
+
+                    categoryChunks.forEach { rowChunk ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = if (rowChunk.size < 3) Arrangement.Center else Arrangement.SpaceBetween
+                        ) {
+                            rowChunk.forEach { cat ->
+                                val spent = expenseTransactions.filter { tx ->
+                                    val matchedCat = matchCategoryForTransaction(tx.category, categories)
+                                    matchedCat?.id == cat.id
+                                }.sumOf { it.amount }
+                                val usagePct = if (overallExpenses > 0) ((spent.toDouble() / overallExpenses.toDouble()) * 100).toInt() else 0
+
+                                SleekLegendBarItem(
+                                    label = cat.name.split(" ")[0],
+                                    usagePercentText = "$usagePct%",
+                                    usageFraction = (usagePct / 100f).coerceIn(0f, 1f),
+                                    color = cat.color
+                                )
+
+                                if (rowChunk.size < 3) {
+                                    Spacer(modifier = Modifier.width(16.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Email Sync Bar: 2 Side-by-Side Cards (Left: Scan 5 [Dark], Right: Scan [Full Neon Green])
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(20.dp)
+                ) {
+                    // LEFT CARD: Scan 5 (Secondary Action - Dark Background)
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(20.dp))
+                            .clickable(enabled = !isRefreshingEmail) { isConfirmScan5DialogOpen = true },
+                        color = DarkCard,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0x225EB893)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (isRefreshingEmail) {
+                                    CircularProgressIndicator(color = SageGreen, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(imageVector = Icons.Default.MarkEmailRead, contentDescription = "Scan 5 Emails", tint = SageGreen, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                            Column {
+                                Text(text = "Bulk Scan", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                                Text(text = "Scan 5 Email", color = Color.Gray, fontSize = 10.sp)
+                            }
+                        }
+                    }
+
+                    // RIGHT CARD: Scan 1 (Primary Action - Full Neon Sage Green Background)
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(20.dp))
+                            .clickable(enabled = !isRefreshingEmail) { onRefreshEmail(1) },
+                        color = SageGreen,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, SageGreen)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF0A0C0F).copy(alpha = 0.15f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (isRefreshingEmail) {
+                                    CircularProgressIndicator(color = Color(0xFF0A0C0F), modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(imageVector = Icons.Default.Refresh, contentDescription = "Scan 1 Email", tint = Color(0xFF0A0C0F), modifier = Modifier.size(18.dp))
+                                }
+                            }
+                            Column {
+                                Text(text = "Scan", color = Color(0xFF0A0C0F), fontSize = 15.sp, fontWeight = FontWeight.Black)
+                                Text(text = "Scan Email", color = Color(0xFF0A0C0F).copy(alpha = 0.7f), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+
+
+            // "Last Transaction & Input" Section matching Reference UI
+            item {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(text = "Last Transaction & Input", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Surface(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { isOverviewAscending = !isOverviewAscending },
+                        color = Color(0xFF1C2026),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x445EB893))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (isOverviewAscending) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
+                                contentDescription = "Sort Order",
+                                tint = SageGreen,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isOverviewAscending) "Ascending" else "Descending",
+                                color = SageGreen,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                if (transactions.isEmpty()) {
+                    Text("No recent transactions.", color = Color.Gray, fontSize = 12.sp)
+                } else {
+                    val displayOverviewList = if (isOverviewAscending) {
+                        transactions.sortedBy { parseTxDateToMillis(it) }
+                    } else {
+                        transactions.sortedByDescending { parseTxDateToMillis(it) }
+                    }
+                    displayOverviewList.take(6).forEach { tx ->
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                color = DarkCard,
+                                shape = RoundedCornerShape(18.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(38.dp)
+                                                .clip(CircleShape)
+                                                .background(if (tx.isExpense) Color(0x22F2C2C2) else Color(0x225EB893)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = if (tx.isExpense) Icons.Default.ArrowDownward else Icons.Default.ArrowUpward,
+                                                contentDescription = "TxType",
+                                                tint = if (tx.isExpense) BlushPink else SageGreen,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = tx.merchant,
+                                                color = Color.White,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = "${tx.category} • ${tx.date}",
+                                                color = Color.Gray,
+                                                fontSize = 10.sp,
+                                                maxLines = 1,
+                                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.width(8.dp))
+
+                                    Text(
+                                        text = if (tx.isExpense) "- ${formatRupiah(tx.amount)}" else "+ ${formatRupiah(tx.amount)}",
+                                        color = if (tx.isExpense) BlushPink else SageGreen,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        PullToRefreshContainer(
+            state = pullToRefreshState,
+            modifier = Modifier.align(Alignment.TopCenter),
+            containerColor = DarkCard,
+            contentColor = SageGreen
+        )
+    }
+
+    // Confirmation Dialog for Scan 5 Emails
+    if (isConfirmScan5DialogOpen) {
         AlertDialog(
-            onDismissRequest = { isConfirmScan20DialogOpen = false },
+            onDismissRequest = { isConfirmScan5DialogOpen = false },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(imageVector = Icons.Default.Warning, contentDescription = "Warning", tint = PastelGold, modifier = Modifier.size(22.dp))
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Konfirmasi Scan 20 Email", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text("Konfirmasi Scan 5 Email", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 }
             },
             text = {
                 Text(
-                    text = "Are you sure you want to scan 20 emails at once?",
+                    text = "Are you sure you want to scan 5 emails at once?",
                     color = Color.LightGray,
                     fontSize = 13.sp
                 )
@@ -2107,8 +2369,8 @@ fun EconomicOverviewHomebase(
             confirmButton = {
                 Button(
                     onClick = {
-                        isConfirmScan20DialogOpen = false
-                        onRefreshEmail(20)
+                        isConfirmScan5DialogOpen = false
+                        onRefreshEmail(5)
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = SageGreen, contentColor = Color(0xFF0A0C0F))
                 ) {
@@ -2116,7 +2378,7 @@ fun EconomicOverviewHomebase(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { isConfirmScan20DialogOpen = false }) {
+                TextButton(onClick = { isConfirmScan5DialogOpen = false }) {
                     Text("Cancel", color = Color.Gray)
                 }
             },
@@ -2164,7 +2426,9 @@ fun WalletsHomebase(
     transactions: List<TransactionModel>,
     categories: List<AllocationCategoryModel>,
     onUpdateTransaction: (TransactionModel) -> Unit,
-    onDeleteTransaction: (TransactionModel) -> Unit
+    onDeleteTransaction: (TransactionModel) -> Unit,
+    isRefreshingDatabase: Boolean = false,
+    onRefreshDatabase: () -> Unit = {}
 ) {
     var transactionToDelete by remember { mutableStateOf<TransactionModel?>(null) }
     var transactionToEdit by remember { mutableStateOf<TransactionModel?>(null) }
@@ -2198,19 +2462,36 @@ fun WalletsHomebase(
     val monthTransactions = transactions.filter { getPaydayCycleMonth(it.date, paydayDate) == selectedYearMonth }
     val monthExpenseTransactions = monthTransactions.filter { it.isExpense }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        // Month Selector Bar
-        item {
-            SleekMonthSelectorBar(
-                selectedYearMonth = selectedYearMonth,
-                availableMonths = availableMonths,
-                paydayDate = paydayDate,
-                onMonthSelected = { selectedYearMonth = it }
-            )
+    val pullToRefreshState = rememberPullToRefreshState()
+    if (pullToRefreshState.isRefreshing) {
+        LaunchedEffect(true) {
+            onRefreshDatabase()
         }
+    }
+    LaunchedEffect(isRefreshingDatabase) {
+        if (!isRefreshingDatabase) {
+            pullToRefreshState.endRefresh()
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .nestedScroll(pullToRefreshState.nestedScrollConnection)
+    ) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Month Selector Bar
+            item {
+                SleekMonthSelectorBar(
+                    selectedYearMonth = selectedYearMonth,
+                    availableMonths = availableMonths,
+                    paydayDate = paydayDate,
+                    onMonthSelected = { selectedYearMonth = it }
+                )
+            }
 
         // Redesigned Top Card: Monthly Financial Performance & Closing Balance Snapshot
         item {
@@ -2414,7 +2695,11 @@ fun WalletsHomebase(
             }
         }
 
-        val displayTransactions = if (isAscendingOrder) monthTransactions else monthTransactions.reversed()
+        val displayTransactions = if (isAscendingOrder) {
+            monthTransactions.sortedBy { parseTxDateToMillis(it) }
+        } else {
+            monthTransactions.sortedByDescending { parseTxDateToMillis(it) }
+        }
         if (displayTransactions.isEmpty()) {
             item {
                 Text("No transaction history found.", color = Color.Gray, fontSize = 12.sp)
@@ -2482,6 +2767,14 @@ fun WalletsHomebase(
             }
         }
     }
+
+    PullToRefreshContainer(
+        state = pullToRefreshState,
+        modifier = Modifier.align(Alignment.TopCenter),
+        containerColor = DarkCard,
+        contentColor = SageGreen
+    )
+}
 
     if (transactionToEdit != null) {
         val targetEditTx = transactionToEdit!!
@@ -3686,9 +3979,7 @@ fun SettingsHomebase(
     isEmailServiceActive: Boolean,
     onEmailServiceActiveChange: (Boolean) -> Unit,
     emailApiKey: String,
-    onEmailApiKeyChange: (String) -> Unit = {},
     recipientEmail: String,
-    onRecipientEmailChange: (String) -> Unit = {},
     isEmailConnected: Boolean,
     isTestingEmailConnection: Boolean,
     onTestSendEmail: () -> Unit
@@ -3705,7 +3996,7 @@ fun SettingsHomebase(
     var confirmPassInput by remember { mutableStateOf("") }
     var changePassErrorMsg by remember { mutableStateOf("") }
 
-    val isEmailFullyActive = isEmailServiceActive && isEmailConnected && (emailApiKey.isNotBlank() || recipientEmail.isNotBlank())
+    val isEmailFullyActive = isEmailServiceActive && isEmailConnected && emailApiKey.isNotBlank() && recipientEmail.isNotBlank()
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -3844,23 +4135,28 @@ fun SettingsHomebase(
 
                         HorizontalDivider(color = DarkCardBorder)
 
-                        OutlinedTextField(
-                            value = recipientEmail,
-                            onValueChange = onRecipientEmailChange,
-                            label = { Text("Recipient Email Address", color = Color.Gray) },
-                            placeholder = { Text("e.g. user@gmail.com", color = Color.Gray) },
-                            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = SageGreen, unfocusedBorderColor = Color.Gray, focusedTextColor = Color.White, unfocusedTextColor = Color.White),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        OutlinedTextField(
-                            value = emailApiKey,
-                            onValueChange = onEmailApiKeyChange,
-                            label = { Text("Google OAuth Client ID", color = Color.Gray) },
-                            placeholder = { Text("e.g. 123456-abc.apps.googleusercontent.com", color = Color.Gray) },
-                            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = SageGreen, unfocusedBorderColor = Color.Gray, focusedTextColor = Color.White, unfocusedTextColor = Color.White),
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                        // Clean Connected Account Information Box (No manual input fields needed)
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = Color(0xFF13171F),
+                            shape = RoundedCornerShape(16.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x225EB893))
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(text = "Connected Google Account", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                    Surface(color = Color(0x225EB893), shape = RoundedCornerShape(6.dp)) {
+                                        Text(text = "OAuth 2.0 Ready", color = SageGreen, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                    }
+                                }
+                                Text(text = recipientEmail.ifBlank { "rickymario62@gmail.com" }, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                                Text(text = "Provider: Google Cloud Services (Gmail API)", color = Color.Gray, fontSize = 11.sp)
+                            }
+                        }
 
                         Button(
                             onClick = onTestSendEmail,
@@ -4430,7 +4726,8 @@ fun BankReceiptSyncDialog(
                         rawReceiptText = it
                         parsedReceipt = parseBankReceiptText(it)
                     },
-                    placeholder = { Text("Paste receipt email content here...", color = Color.Gray) },
+                    label = { Text("Teks Struk Email / Receipt Text", color = Color.Gray, fontSize = 11.sp) },
+                    placeholder = { Text("Tempel teks email dari rickymario62@gmail.com di sini...", color = Color.Gray) },
                     maxLines = 6,
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = SageGreen, unfocusedBorderColor = Color.Gray, focusedTextColor = Color.White, unfocusedTextColor = Color.White),
                     modifier = Modifier.fillMaxWidth().height(120.dp)

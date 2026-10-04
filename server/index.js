@@ -14,9 +14,9 @@ app.use(cors());
 app.use(express.json());
 
 // Initialize Supabase Client
-const supabaseUrl = process.env.SUPABASE_URL || '';
-const supabaseKey = process.env.SUPABASE_ANON_KEY || '';
-const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
+const supabaseUrl = process.env.SUPABASE_URL || 'https://lhljhwoupybvcsqgdejs.supabase.co';
+const supabaseKey = process.env.SUPABASE_ANON_KEY || 'sb_publishable_XDFEGRz8Dw-T0s2HT2knew_RdvEOdg4';
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 let userGmailTokens = null;
 
